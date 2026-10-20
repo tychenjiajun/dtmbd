@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! L6 — discovery: advertise `http://<hostname>.local:8080/playlist.m3u` over
 //! mDNS so the TV does not care about DHCP addresses.
 //!

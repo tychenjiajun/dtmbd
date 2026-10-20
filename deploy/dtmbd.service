@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=dtmb
-Group=dtmb
-StateDirectory=dtmb
-ExecStart=/usr/local/bin/dtmb serve --bind 0.0.0.0:8080 \
-    --table /var/lib/dtmb/channels.json \
-    --names /etc/dtmb/names.json
+User=dtmbd
+Group=dtmbd
+StateDirectory=dtmbd
+ExecStart=/usr/local/bin/dtmbd serve --bind 0.0.0.0:8080 \
+    --table /var/lib/dtmbd/channels.json \
+    --names /etc/dtmbd/names.json
 Restart=always
 RestartSec=5
 

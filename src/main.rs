@@ -1,4 +1,7 @@
-//! dtmb — a Raspberry-Pi sized DTMB → IPTV box.
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
+//! dtmbd — a Raspberry-Pi sized DTMB → IPTV box.
 //!
 //!   天线 → 电视棒(USB) → MPEG-TS → HTTP → 安卓电视上的 IPTV 播放器
 //!
@@ -32,7 +35,7 @@ use catalog::ChannelTable;
 use usb::Device;
 
 #[derive(Parser)]
-#[command(name = "dtmb", version, about = "DTMB USB stick → IPTV over your LAN")]
+#[command(name = "dtmbd", version, about = "DTMB USB stick → IPTV over your LAN")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

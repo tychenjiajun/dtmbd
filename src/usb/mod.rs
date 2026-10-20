@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! L1 — USB transport (rusb / libusb-1.0).
 //!
 //! The stick is a vendor-class device: one interface, vendor control requests on

@@ -1,2 +1,2 @@
-# DTMB stick (04b4:1004). Lets the unprivileged `dtmb` user open it.
+# DTMB stick (04b4:1004). Lets the unprivileged `dtmbd` user open it.
 SUBSYSTEM=="usb", ATTR{idVendor}=="04b4", ATTR{idProduct}=="1004", MODE="0666"

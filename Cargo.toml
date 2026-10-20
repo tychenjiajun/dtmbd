@@ -1,7 +1,13 @@
 [package]
-name = "dtmb"
+name = "dtmbd"
 version = "0.1.0"
 edition = "2024"
+description = "DTMB/DMB-TH USB stick → IPTV (M3U / MPEG-TS) for Raspberry Pi. No kernel driver, no transcoding."
+license = "GPL-2.0-or-later"
+repository = "https://github.com/tychenjiajun/dtmbd"
+homepage = "https://github.com/tychenjiajun/dtmbd"
+keywords = ["dtmb", "iptv", "m3u", "raspberry-pi", "mpegts"]
+categories = ["multimedia::video", "hardware-support", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.104"

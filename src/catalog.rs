@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! L4 — catalogue: the channel table produced by a scan, the M3U playlist the
 //! TV subscribes to, and external name patches for muxes that carry no SDT.
 //!

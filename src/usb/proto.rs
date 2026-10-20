@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! L1 — wire protocol of the DTMB USB stick (`04b4:1004`, NERC / Letv / Aiwa / CVB).
 //!
 //! Derived from the Linux drivers `hd2312` (NERC) and `DtmbUSB` (Letv/Aiwa/CVB)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! MPEG-TS: byte-stream re-alignment, PSI parsing (PAT/PMT/SDT), per-PID filtering.
 //!
 //! The dongle hands us a raw TS byte stream with no packet framing guarantees:

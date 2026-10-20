@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! L5 — delivery: HTTP endpoints the Android TV app talks to.
 //!
 //! Contract with the client:

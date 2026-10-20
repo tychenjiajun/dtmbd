@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Jiajun Chen <tychenjiajun@live.cn>
+
 //! L3 — single-tuner service.
 //!
 //! One stick can only receive one multiplex at a time, so this layer owns the

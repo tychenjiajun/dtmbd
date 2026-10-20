@@ -1,0 +1,69 @@
+# dtmbd
+
+> dtmbd turns a DTMB/DMB-TH USB TV tuner stick (Cypress `04b4:1004`, HDIC HD2312 class)
+> plugged into a Raspberry Pi into an IPTV server on the local network. Android TV boxes,
+> Kodi, TiviMate or VLC subscribe to an M3U playlist and play the raw MPEG-TS. No kernel
+> driver, no firmware upload, no transcoding. GPL-2.0-or-later, written in Rust.
+
+## Facts
+
+- Repository: https://github.com/tychenjiajun/dtmbd
+- License: GPL-2.0-or-later
+- Language: Rust (single static binary, ~2.2k LOC)
+- Platforms: Linux (Raspberry Pi 3/4/5, x86_64), macOS, Windows (device must be bound to WinUSB via Zadig)
+- Hardware: DTMB / DMB-TH USB sticks with USB ID `04b4:1004`
+  (NERC DTV, Letv, Aiwa, CVB variants; CY68013A + HDIC HD2312)
+- Input: one DVB-T-style 8 MHz multiplex at a time (474–866 MHz UHF raster, 8 MHz steps)
+- Output: HTTP `GET /playlist.m3u`, `GET /p/<service_id>.ts` (MPEG-TS), `GET /stream.ts`,
+  `GET /status.json`, `GET /api/signal?freq=<MHz>`, `GET /meter`
+- Codecs: pass-through only — AVS+ (AVS1-P16) video, MP2 / DRA audio, DVB subtitles
+- Typical numbers (Guangzhou, indoor antenna): 4 multiplexes, 33 services,
+  9.3 Mbit/s per multiplex, 2–4 Mbit/s per service, 1.5–2 s channel-change,
+  TS continuity errors 0.008%, CPU < 5% of one core
+- No transcoding, no recording, no EPG export, single tuner by design
+
+## How it works
+
+1. L1 `src/usb` — vendor control transfers (tune/power/stream) + bulk endpoint 0x82
+2. L2 `src/ts` — 188-byte re-alignment, PAT/PMT/SDT parsing (GB2312 service names), PID filter
+3. L3 `src/tuner` — single-tuner worker: lazy tune, retune on demand, USB recovery, fan-out
+4. L4 `src/catalog` — channel table (JSON), M3U generation, name patches for SDT-less muxes
+5. L5 `src/http` — playlist, per-service MPEG-TS, status, antenna meter page
+6. L6 `src/mdns` — advertises `dtmbd.local`
+
+## Quick start
+
+```bash
+git clone https://github.com/tychenjiajun/dtmbd.git && cd dtmbd
+sudo ./deploy/install.sh presets/guangzhou-foshan.json
+# then on the TV: subscribe to http://dtmbd.local:8080/playlist.m3u
+```
+
+## Common questions
+
+- **Does it need a kernel driver?** No. It talks to the stick through libusb; the device
+  enumerates already in its warm state, so no FX2 firmware upload is needed either.
+- **Does it need to transcode?** No. The MPEG-TS is forwarded untouched, which is why a
+  Raspberry Pi Zero 2 W is enough.
+- **Why is there audio but no video in my player?** Chinese DTMB video is AVS+
+  (AVS1-P16). The player must support it; mainstream TV-box chips do, software-only
+  players usually do not.
+- **Can one stick serve two different frequencies at once?** No, one tuner = one
+  multiplex. Multiple services on the same multiplex can be watched simultaneously.
+- **How is it different from TVHeadend?** TVHeadend needs a kernel DVB device
+  (`/dev/dvb`), which these sticks do not have a driver for. dtmbd drives the stick
+  directly and can still feed TVHeadend as an IPTV source.
+
+## Protocol notes
+
+Vendor request table and the hardware quirks (stop streaming before retune, power-cycle
+recovery, stale lock/PSI after a failed retune, 2 KB FIFO residue, GB2312 service names,
+474 + 8n MHz raster, no blocking in the read loop) are documented in
+`src/usb/proto.rs` and the project README.
+
+## Related projects
+
+- https://github.com/hanwckf/hd2312 — Linux DVB driver for the NERC stick (GPL-2.0)
+- https://github.com/nxdong520/DtmbUSB — Linux DVB driver for Letv/Aiwa/CVB sticks (GPL-2.0)
+- https://github.com/IcingTomato/LeDTMB — Windows implementation
+- https://github.com/xeonliu/libcavs — AVS-P16 (AVS+) decoder used to verify playback

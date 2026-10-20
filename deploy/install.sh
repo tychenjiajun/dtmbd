@@ -8,14 +8,14 @@ NAMES_SRC="${1:-}"
 BIN="${BIN:-}"
 
 if [[ -z "$BIN" ]]; then
-  if [[ -x ./target/release/dtmb ]]; then
-    BIN=./target/release/dtmb
+  if [[ -x ./target/release/dtmbd ]]; then
+    BIN=./target/release/dtmbd
   elif command -v cargo >/dev/null; then
     echo "==> building (first Pi build takes a few minutes)"
     cargo build --release
-    BIN=./target/release/dtmb
+    BIN=./target/release/dtmbd
   else
-    echo "no binary and no cargo: install rust (https://rustup.rs) or copy target/release/dtmb here" >&2
+    echo "no binary and no cargo: install rust (https://rustup.rs) or copy target/release/dtmbd here" >&2
     exit 1
   fi
 fi
@@ -26,37 +26,37 @@ if command -v apt-get >/dev/null; then
 fi
 
 echo "==> user + directories"
-id -u dtmb >/dev/null 2>&1 || useradd --system --home /var/lib/dtmb --shell /usr/sbin/nologin dtmb
-install -d -o dtmb -g dtmb -m 0755 /var/lib/dtmb /etc/dtmb
+id -u dtmbd >/dev/null 2>&1 || useradd --system --home /var/lib/dtmbd --shell /usr/sbin/nologin dtmbd
+install -d -o dtmbd -g dtmbd -m 0755 /var/lib/dtmbd /etc/dtmbd
 
 echo "==> binary"
-install -m 0755 "$BIN" /usr/local/bin/dtmb
+install -m 0755 "$BIN" /usr/local/bin/dtmbd
 
 if [[ -n "$NAMES_SRC" ]]; then
-  install -m 0644 "$NAMES_SRC" /etc/dtmb/names.json
-  echo "    name patch → /etc/dtmb/names.json"
+  install -m 0644 "$NAMES_SRC" /etc/dtmbd/names.json
+  echo "    name patch → /etc/dtmbd/names.json"
 fi
 
 echo "==> udev rule (unprivileged USB access)"
-install -m 0644 deploy/99-dtmb.rules /etc/udev/rules.d/99-dtmb.rules
+install -m 0644 deploy/99-dtmbd.rules /etc/udev/rules.d/99-dtmbd.rules
 udevadm control --reload-rules && udevadm trigger
 
 echo "==> systemd unit"
-install -m 0644 deploy/dtmb.service /etc/systemd/system/dtmb.service
+install -m 0644 deploy/dtmbd.service /etc/systemd/system/dtmbd.service
 systemctl daemon-reload
-systemctl enable --now dtmb
+systemctl enable --now dtmbd
 
 sleep 2
-systemctl --no-pager --lines=15 status dtmb || true
+systemctl --no-pager --lines=15 status dtmbd || true
 IP=$(hostname -I | awk '{print $1}')
 cat <<MSG
 
 done.  First start scans the band (a few minutes), then:
 
-  playlist:  http://dtmb.local:8080/playlist.m3u
+  playlist:  http://dtmbd.local:8080/playlist.m3u
              http://${IP}:8080/playlist.m3u
   status:    http://${IP}:8080/status.json
-  logs:      journalctl -u dtmb -f
-  rescan:    sudo systemctl stop dtmb && sudo -u dtmb /usr/local/bin/dtmb scan \\
-                 --names /etc/dtmb/names.json --save /var/lib/dtmb/channels.json
+  logs:      journalctl -u dtmbd -f
+  rescan:    sudo systemctl stop dtmbd && sudo -u dtmbd /usr/local/bin/dtmbd scan \\
+                 --names /etc/dtmbd/names.json --save /var/lib/dtmbd/channels.json
 MSG
