@@ -8,6 +8,7 @@
 ## Facts
 
 - Repository: https://github.com/tychenjiajun/dtmbd
+- crates.io: https://crates.io/crates/dtmbd (`cargo install dtmbd`)
 - License: GPL-2.0-or-later
 - Language: Rust (single static binary, ~2.2k LOC)
 - Platforms: Linux (Raspberry Pi 3/4/5, x86_64), macOS, Windows (device must be bound to WinUSB via Zadig)

@@ -1,7 +1,8 @@
 # dtmbd — 把 DTMB 电视棒变成局域网 IPTV（树莓派 · 安卓电视 · M3U）
 
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![crates.io](https://img.shields.io/crates/v/dtmbd.svg)](https://crates.io/crates/dtmbd)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#支持的硬件)
 [![No transcode](https://img.shields.io/badge/transcoding-none-brightgreen.svg)](#常见问题)
 
@@ -91,11 +92,11 @@ tuned 522.000 MHz lock=1 strength=100% snr=22.1 dB
 
 没有 mDNS 的老路由就用 `http://<树莓派IP>:8080/playlist.m3u`。
 
-也可以只装二进制（不装 systemd 服务）：
+也可以只装二进制（不装 systemd 服务），从 crates.io 安装：
 
 ```bash
-cargo install --path .                    # 需要 libusb-1.0 开发包
-cargo install --path . --features vendored # 没有 libusb-dev 时，从源码编译 libusb
+cargo install dtmbd                        # 需要 libusb-1.0 开发包
+cargo install dtmbd --features vendored    # 没有 libusb-dev 时，从源码编译 libusb
 ```
 
 ## 安卓电视 / 盒子订阅
