@@ -63,6 +63,14 @@ impl Dtmb {
                 ctrl_stalled: false,
             };
 
+            // A previous process may have died mid-stream, leaving the FX2 FIFO
+            // full and the tuner wedged: power-cycle before doing anything else.
+            let _ = this.ctrl_out(req::POWER_OFF, &[]);
+            std::thread::sleep(Duration::from_millis(120));
+            let _ = this.ctrl_out(req::POWER_ON, &[]);
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = this.ctrl_out(req::STREAM_OFF, &[]);
+
             let mut v = [0u8; 4];
             let n = this.ctrl_in(req::GET_VERSION, &mut v)?;
             if n != 4 {
@@ -248,6 +256,15 @@ impl Dtmb {
         Ok(())
     }
 
+    /// Power-cycle the frontend. Costs ~400 ms but is the only reliable way to
+    /// recover from the FX2 wedge that shows up after long tuning/streaming runs.
+    pub fn power_cycle(&mut self) {
+        let _ = self.ctrl_out(req::POWER_OFF, &[]);
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = self.ctrl_out(req::POWER_ON, &[]);
+        std::thread::sleep(Duration::from_millis(350));
+    }
+
     pub fn stream(&mut self, on: bool) -> Result<()> {
         let r = if on { req::STREAM_ON } else { req::STREAM_OFF };
         self.ctrl_out(r, &[])?;
@@ -256,12 +273,43 @@ impl Dtmb {
 
     /// Set the tuner frequency. Two writes are needed on the Letv-class firmware:
     /// 0xFC carries the frequency, then 0xEA with the same payload kicks demod lock.
-    pub fn set_freq(&mut self, hz: u32) -> Result<()> {
+    /// Experimental: kick payload length 0 = no kick, 1 or 4 = bytes written to 0xEA.
+    pub fn set_freq_variant(&mut self, hz: u32, kick_len: usize) -> Result<()> {
+        let mut off: [u8; 0] = [];
+        let _ = self.ctrl(Direction::Out, req::STREAM_OFF, Some(&mut off), Duration::from_millis(120), false);
         let mut payload = proto::encode_freq(hz);
         self.ctrl_out_mut(req::SET_FREQ, &mut payload)?;
-        let mut kick = proto::encode_freq(hz);
-        // the kick is optional on NERC firmware: ignore a stall/timeout here
-        let _ = self.ctrl_out_quiet(req::LOCK, &mut kick, Duration::from_millis(150));
+        if kick_len > 0 {
+            let mut kick = proto::encode_freq(hz).to_vec();
+            kick.truncate(kick_len);
+            let _ = self.ctrl_out_quiet(req::LOCK, &mut kick, Duration::from_millis(200));
+        }
+        Ok(())
+    }
+
+    /// Time-to-lock measurement helper (ms), or None if it never locked.
+    pub fn time_to_lock(&mut self, budget: Duration) -> Option<u128> {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < budget {
+            std::thread::sleep(Duration::from_millis(100));
+            if self.locked_with(Duration::from_millis(300)).unwrap_or(false) {
+                return Some(t0.elapsed().as_millis());
+            }
+        }
+        None
+    }
+
+    pub fn set_freq(&mut self, hz: u32) -> Result<()> {
+        // the FX2 wedges if the frequency is changed while it is streaming:
+        // always stop the pipe, retune, then let the caller restart it
+        let mut off: [u8; 0] = [];
+        let _ = self.ctrl(Direction::Out, req::STREAM_OFF, Some(&mut off), Duration::from_millis(120), false);
+        let mut payload = proto::encode_freq(hz);
+        self.ctrl_out_mut(req::SET_FREQ, &mut payload)?;
+        // 1-byte kick is what the Letv driver does and locks ~200 ms faster than
+        // the 4-byte variant; NERC firmware ignores it either way.
+        let mut kick = proto::encode_freq(hz)[..1].to_vec();
+        let _ = self.ctrl_out_quiet(req::LOCK, &mut kick, Duration::from_millis(200));
         Ok(())
     }
 

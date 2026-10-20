@@ -1,0 +1,196 @@
+{
+  "names": [
+    {
+      "freq_hz": 514000000,
+      "sid": 301,
+      "name": "中央电视台综合频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 302,
+      "name": "中央电视台财经频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 303,
+      "name": "中央电视台中文国际频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 304,
+      "name": "中央电视台科教频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 305,
+      "name": "中央电视台社会与法频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 306,
+      "name": "中央电视台新闻频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 307,
+      "name": "中央电视台少儿频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 308,
+      "name": "中央电视台音乐频道",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 101,
+      "name": "中国之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 102,
+      "name": "经济之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 103,
+      "name": "音乐之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 104,
+      "name": "经典音乐广播",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 105,
+      "name": "台海之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 106,
+      "name": "神州之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 108,
+      "name": "民族之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 109,
+      "name": "文艺之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 110,
+      "name": "老年之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 112,
+      "name": "阅读之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 115,
+      "name": "中国交通广播",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 116,
+      "name": "中国乡村之声",
+      "provider": "CCTV/CNR"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 401,
+      "name": "CCTV-17 农业农村",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 402,
+      "name": "CCTV-9 纪录",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 403,
+      "name": "CCTV-11 戏曲",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 514000000,
+      "sid": 404,
+      "name": "CGTN 中国环球电视网",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 522000000,
+      "sid": 401,
+      "name": "CCTV-17 农业农村",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 522000000,
+      "sid": 402,
+      "name": "CCTV-9 纪录",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 522000000,
+      "sid": 403,
+      "name": "CCTV-11 戏曲",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 522000000,
+      "sid": 404,
+      "name": "CGTN 中国环球电视网",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 698000000,
+      "sid": 401,
+      "name": "CCTV-17 农业农村",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 698000000,
+      "sid": 402,
+      "name": "CCTV-9 纪录",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 698000000,
+      "sid": 403,
+      "name": "CCTV-11 戏曲",
+      "provider": "CCTV"
+    },
+    {
+      "freq_hz": 698000000,
+      "sid": 404,
+      "name": "CGTN 中国环球电视网",
+      "provider": "CCTV"
+    }
+  ]
+}

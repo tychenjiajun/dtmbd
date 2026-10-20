@@ -180,15 +180,15 @@ pub fn crc32_mpeg(data: &[u8]) -> u32 {
     crc
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EsInfo {
     pub stream_type: u8,
     pub pid: u16,
-    pub kind: &'static str,
+    pub kind: String,
     pub language: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     pub service_id: u16,
     pub pmt_pid: u16,
@@ -236,6 +236,10 @@ pub struct Analyzer {
     pub programs: BTreeMap<u16, Program>,
     pub pat_pids: Vec<(u16, u16)>,
     pub packet_count: u64,
+    /// raw PAT section of the current mux — used to detect a stale lock
+    pub last_pat: Option<Vec<u8>>,
+    /// transport_stream_id of the current mux (from PAT)
+    pub tsid: Option<u16>,
 }
 
 impl Analyzer {
@@ -280,6 +284,8 @@ impl Analyzer {
 
     fn on_pat(&mut self, s: Vec<u8>) {
         self.cache.insert(PID_PAT, s.clone());
+        self.tsid = Some(u16::from_be_bytes([s[3], s[4]]));
+        self.last_pat = Some(s.clone());
         let mut pat_pids = Vec::new();
         // skip table_id(1) + section_len(2) + tsid(2) + version(1) + sec(1) + last(1)
         let mut i = 8;
@@ -326,7 +332,7 @@ impl Analyzer {
             streams.push(EsInfo {
                 stream_type: st,
                 pid: epid,
-                kind: stream_kind(st),
+                kind: stream_kind(st).to_string(),
                 language: language_from_descriptors(desc),
             });
             i += 5 + es_len;
@@ -422,30 +428,32 @@ fn parse_service_descriptor(d: &[u8]) -> Option<(String, Option<String>)> {
     None
 }
 
-/// DVB text: 0x15 = UTF-8, 0x11 = UCS-2 BE, 0x10 = ISO-8859-1, default GB2312-ish.
+/// DVB text: 0x15 = UTF-8, 0x11 = UCS-2 BE, 0x10 = ISO-8859-1, 0x0B/0x00 = GB2312.
+/// Chinese muxes mostly use GB2312 without any marker, which used to reduce
+/// "广州综合HD" to "-HD" because every high byte was dropped.
 fn decode_dvb_string(b: &[u8]) -> String {
     if b.is_empty() {
         return String::new();
     }
-    match b[0] {
-        0x15 => String::from_utf8_lossy(&b[1..]).trim_end_matches('\0').to_string(),
+    let (enc, body): (&'static encoding_rs::Encoding, &[u8]) = match b[0] {
+        0x15 => (encoding_rs::UTF_8, &b[1..]),
         0x11 => {
             let u16s: Vec<u16> = b[1..]
                 .chunks_exact(2)
                 .map(|c| u16::from_be_bytes([c[0], c[1]]))
                 .collect();
-            String::from_utf16_lossy(&u16s).trim_end_matches('\0').to_string()
+            return String::from_utf16_lossy(&u16s)
+                .trim_end_matches('\0')
+                .to_string();
         }
-        0x10 => b[1..].iter().map(|&c| c as char).collect::<String>().trim_end_matches('\0').to_string(),
-        // GB2312: no decoder on hand — pass ASCII through, drop high bytes
-        _ => b
-            .iter()
-            .filter(|&&c| (0x20..0x7F).contains(&c))
-            .map(|&c| c as char)
-            .collect::<String>()
-            .trim_end()
-            .to_string(),
-    }
+        0x10 => (encoding_rs::WINDOWS_1252, &b[1..]),
+        0x0B => (encoding_rs::GBK, &b[1..]),
+        // no control byte: control codes are 0x00..0x1F, so this is GB2312 text
+        c if c >= 0x20 => (encoding_rs::GBK, b),
+        _ => (encoding_rs::GBK, &b[1..]),
+    };
+    let (text, _, _) = enc.decode(body);
+    text.trim_end_matches('\0').trim().to_string()
 }
 
 /// Whether a packet's PID belongs to the wanted set (or carries PSI we must keep).
@@ -531,6 +539,17 @@ mod tests {
             aligner.push(chunk, &mut out);
         }
         assert_eq!(out.len(), 20 * PKT);
+    }
+
+    #[test]
+    fn decodes_gb2312_service_names() {
+        // "广东体育-HD" in GB2312, no charset marker (the common case on CN muxes)
+        let raw = [0xB9, 0xE3, 0xB6, 0xAB, 0xCC, 0xE5, 0xD3, 0xFD, b'-', b'H', b'D'];
+        assert_eq!(decode_dvb_string(&raw), "广东体育-HD");
+        // 0x15 = UTF-8 marker
+        let mut utf8 = vec![0x15];
+        utf8.extend_from_slice("广州综合".as_bytes());
+        assert_eq!(decode_dvb_string(&utf8), "广州综合");
     }
 
     #[test]
