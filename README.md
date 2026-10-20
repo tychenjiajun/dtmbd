@@ -15,7 +15,7 @@
 > LAN. Any Android TV, Kodi, TiviMate or VLC client subscribes to the M3U playlist and
 > plays the raw MPEG-TS: **no coax run to the TV, no kernel driver, no transcoding.**
 
-![514 MHz / 522 MHz 频道截帧（AVS+ 解码后）](docs/screenshot-cctv-514-522.jpg)
+![514 MHz / 522 MHz 频道截帧（AVS+ 解码后）](https://raw.githubusercontent.com/tychenjiajun/dtmbd/main/docs/screenshot-cctv-514-522.jpg)
 
 ---
 
@@ -91,6 +91,13 @@ tuned 522.000 MHz lock=1 strength=100% snr=22.1 dB
 
 没有 mDNS 的老路由就用 `http://<树莓派IP>:8080/playlist.m3u`。
 
+也可以只装二进制（不装 systemd 服务）：
+
+```bash
+cargo install --path .                    # 需要 libusb-1.0 开发包
+cargo install --path . --features vendored # 没有 libusb-dev 时，从源码编译 libusb
+```
+
 ## 安卓电视 / 盒子订阅
 
 装任意支持 M3U 的 IPTV 播放器（TiviMate / Kodi + PVR IPTV Simple / OTT Navigator /
@@ -159,7 +166,7 @@ dtmbd meter --scan --json           # 给脚本用
 | 换台延迟 | 1.5–2 s |
 | CPU 占用 | 单核 <5%（不转码） |
 
-![474 MHz / 506 MHz 频道截帧](docs/screenshot-gdtv-474-506.jpg)
+![474 MHz / 506 MHz 频道截帧](https://raw.githubusercontent.com/tychenjiajun/dtmbd/main/docs/screenshot-gdtv-474-506.jpg)
 
 ## 常见问题（FAQ）
 
