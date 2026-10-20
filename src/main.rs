@@ -19,7 +19,7 @@
 //!   main       CLI, first-run scan, wiring
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,91 +41,130 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// UHF band raster shared by `scan` and `meter --scan`.
+#[derive(Args)]
+struct Band {
+    #[arg(long, default_value_t = usb::proto::FREQ_MIN_HZ as f64 / 1e6)]
+    start_mhz: f64,
+    #[arg(long, default_value_t = usb::proto::FREQ_MAX_HZ as f64 / 1e6)]
+    end_mhz: f64,
+    #[arg(long, default_value_t = usb::proto::FREQ_STEP_HZ as f64 / 1e6)]
+    step_mhz: f64,
+}
+
+impl Default for Band {
+    fn default() -> Self {
+        Self {
+            start_mhz: usb::proto::FREQ_MIN_HZ as f64 / 1e6,
+            end_mhz: usb::proto::FREQ_MAX_HZ as f64 / 1e6,
+            step_mhz: usb::proto::FREQ_STEP_HZ as f64 / 1e6,
+        }
+    }
+}
+
+impl Band {
+    /// Frequencies from `start_mhz` to `end_mhz` inclusive, in `step_mhz` steps.
+    fn freqs(&self) -> impl Iterator<Item = u32> + '_ {
+        let step = (self.step_mhz * 1e6).round() as u32;
+        let mut hz = (self.start_mhz * 1e6).round() as u32;
+        let end = (self.end_mhz * 1e6).round() as u32;
+        std::iter::from_fn(move || {
+            if hz > end {
+                return None;
+            }
+            let cur = hz;
+            hz += step;
+            Some(cur)
+        })
+    }
+}
+
+const DWELL_MS: u64 = 900;
+const GRAB_SECS: f64 = 1.5;
+
+#[derive(Args)]
+struct ScanArgs {
+    #[command(flatten)]
+    band: Band,
+    /// How long to wait for demod lock per channel.
+    #[arg(long, default_value_t = DWELL_MS)]
+    dwell_ms: u64,
+    /// Seconds of TS to collect per mux to learn its programme list.
+    #[arg(long, default_value_t = GRAB_SECS)]
+    grab_secs: f64,
+    /// Name patch for muxes that carry no SDT (see presets/).
+    #[arg(long)]
+    names: Option<PathBuf>,
+    #[arg(long)]
+    save: Option<PathBuf>,
+}
+
+impl Default for ScanArgs {
+    fn default() -> Self {
+        Self {
+            band: Band::default(),
+            dwell_ms: DWELL_MS,
+            grab_secs: GRAB_SECS,
+            names: None,
+            save: None,
+        }
+    }
+}
+
+#[derive(Args)]
+struct MeterArgs {
+    /// Frequency to watch. Omit (or pass --scan) to sweep the band.
+    #[arg(long)]
+    freq_mhz: Option<f64>,
+    /// Sweep the band and rank every mux by signal quality.
+    #[arg(long)]
+    scan: bool,
+    #[command(flatten)]
+    band: Band,
+    /// How long to wait for lock on each frequency while sweeping.
+    #[arg(long, default_value_t = 700)]
+    settle_ms: u64,
+    /// Live refresh interval.
+    #[arg(long, default_value_t = 300)]
+    interval_ms: u64,
+    /// Machine readable output (sweep only).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    bind: String,
+    /// Channel table; defaults to ~/.dtmb/channels.json.
+    #[arg(long)]
+    table: Option<PathBuf>,
+    /// Name patch used only when the channel table has to be built on first run.
+    #[arg(long)]
+    names: Option<PathBuf>,
+    /// Hostname advertised over mDNS and used in the playlist URL.
+    #[arg(long, default_value = "dtmb")]
+    hostname: String,
+    #[arg(long)]
+    no_mdns: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Scan the band and write the channel table (first run does this automatically).
-    Scan {
-        #[arg(long, default_value_t = 474.0)]
-        start_mhz: f64,
-        #[arg(long, default_value_t = 866.0)]
-        end_mhz: f64,
-        #[arg(long, default_value_t = 8.0)]
-        step_mhz: f64,
-        /// How long to wait for demod lock per channel.
-        #[arg(long, default_value_t = 900)]
-        dwell_ms: u64,
-        /// Seconds of TS to collect per mux to learn its programme list.
-        #[arg(long, default_value_t = 1.5)]
-        grab_secs: f64,
-        /// Name patch for muxes that carry no SDT (see presets/).
-        #[arg(long)]
-        names: Option<PathBuf>,
-        #[arg(long)]
-        save: Option<PathBuf>,
-    },
+    Scan(ScanArgs),
     /// Antenna meter: live signal readings on one frequency, or a fast sweep
     /// to find the strongest mux while aiming the antenna.
-    Meter {
-        /// Frequency to watch. Omit (or pass --scan) to sweep the band.
-        #[arg(long)]
-        freq_mhz: Option<f64>,
-        /// Sweep the band and rank every mux by signal quality.
-        #[arg(long)]
-        scan: bool,
-        #[arg(long, default_value_t = 474.0)]
-        start_mhz: f64,
-        #[arg(long, default_value_t = 866.0)]
-        end_mhz: f64,
-        #[arg(long, default_value_t = 8.0)]
-        step_mhz: f64,
-        /// How long to wait for lock on each frequency while sweeping.
-        #[arg(long, default_value_t = 700)]
-        settle_ms: u64,
-        /// Live refresh interval.
-        #[arg(long, default_value_t = 300)]
-        interval_ms: u64,
-        /// Machine readable output (sweep only).
-        #[arg(long)]
-        json: bool,
-    },
+    Meter(MeterArgs),
     /// Run the IPTV server (this is what systemd starts).
-    Serve {
-        #[arg(long, default_value = "0.0.0.0:8080")]
-        bind: String,
-        /// Channel table; defaults to ~/.dtmb/channels.json.
-        #[arg(long)]
-        table: Option<PathBuf>,
-        /// Name patch used only when the channel table has to be built on first run.
-        #[arg(long)]
-        names: Option<PathBuf>,
-        /// Hostname advertised over mDNS and used in the playlist URL.
-        #[arg(long, default_value = "dtmb")]
-        hostname: String,
-        #[arg(long)]
-        no_mdns: bool,
-    },
+    Serve(ServeArgs),
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Scan {
-            start_mhz,
-            end_mhz,
-            step_mhz,
-            dwell_ms,
-            grab_secs,
-            names,
-            save,
-        } => {
-            let table = scan(ScanOpts {
-                start_mhz,
-                end_mhz,
-                step_mhz,
-                dwell_ms,
-                grab_secs,
-                names,
-            })?;
-            let path = save.unwrap_or_else(catalog::default_table_path);
+        Cmd::Scan(a) => {
+            let path = a.save.clone().unwrap_or_else(catalog::default_table_path);
+            let table = scan(a)?;
             table.save(&path)?;
             println!(
                 "{} channel(s) in {} mux(es) → {}",
@@ -135,46 +174,16 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Meter {
-            freq_mhz,
-            scan,
-            start_mhz,
-            end_mhz,
-            step_mhz,
-            settle_ms,
-            interval_ms,
-            json,
-        } => meter(MeterOpts {
-            freq_mhz,
-            scan,
-            start_mhz,
-            end_mhz,
-            step_mhz,
-            settle_ms,
-            interval_ms,
-            json,
-        }),
-        Cmd::Serve {
-            bind,
-            table,
-            names,
-            hostname,
-            no_mdns,
-        } => serve(bind, table, names, hostname, no_mdns),
+        Cmd::Meter(a) => meter(a),
+        Cmd::Serve(a) => serve(a),
     }
 }
 
 // ---------------------------------------------------------------------- serve
 
-fn serve(
-    bind: String,
-    table_path: Option<PathBuf>,
-    names: Option<PathBuf>,
-    hostname: String,
-    no_mdns: bool,
-) -> Result<()> {
-    let listen: std::net::SocketAddr = bind.parse().context("parsing --bind")?;
-    let table_path = table_path.unwrap_or_else(catalog::default_table_path);
+fn serve(a: ServeArgs) -> Result<()> {
+    let listen: std::net::SocketAddr = a.bind.parse().context("parsing --bind")?;
+    let table_path = a.table.unwrap_or_else(catalog::default_table_path);
 
     let table = if table_path.exists() {
         let t = ChannelTable::load(&table_path)?;
@@ -187,25 +196,28 @@ fn serve(
         t
     } else {
         println!("no channel table yet — scanning once (takes a few minutes)");
-        let t = scan(ScanOpts {
-            names,
-            ..ScanOpts::default()
+        let t = scan(ScanArgs {
+            names: a.names,
+            ..ScanArgs::default()
         })?;
         t.save(&table_path)?;
         t
     };
 
     let lan_ip = mdns::local_ip();
-    let base = if no_mdns {
+    let base = if a.no_mdns {
         format!("http://{lan_ip}:{}", listen.port())
     } else {
-        format!("http://{hostname}.local:{}", listen.port())
+        format!("http://{}.local:{}", a.hostname, listen.port())
     };
-    if !no_mdns {
-        mdns::advertise(&hostname, listen.port(), &lan_ip);
+    if !a.no_mdns {
+        mdns::advertise(&a.hostname, listen.port(), &lan_ip);
     }
     if base.contains(".local") {
-        println!("also reachable at http://{lan_ip}:{}/playlist.m3u", listen.port());
+        println!(
+            "also reachable at http://{lan_ip}:{}/playlist.m3u",
+            listen.port()
+        );
     }
 
     let tuner = tuner::Tuner::spawn(log);
@@ -218,78 +230,45 @@ fn log(msg: &str) {
 
 // ----------------------------------------------------------------------- scan
 
-struct ScanOpts {
-    start_mhz: f64,
-    end_mhz: f64,
-    step_mhz: f64,
-    dwell_ms: u64,
-    grab_secs: f64,
-    names: Option<PathBuf>,
-}
-
-impl Default for ScanOpts {
-    fn default() -> Self {
-        Self {
-            start_mhz: usb::proto::FREQ_MIN_HZ as f64 / 1e6,
-            end_mhz: usb::proto::FREQ_MAX_HZ as f64 / 1e6,
-            step_mhz: usb::proto::FREQ_STEP_HZ as f64 / 1e6,
-            dwell_ms: 900,
-            grab_secs: 1.5,
-            names: None,
-        }
-    }
-}
-
 struct Grab {
     bytes: u64,
     programs: Vec<ts::Program>,
     pat: Option<Vec<u8>>,
 }
 
-fn scan(opts: ScanOpts) -> Result<ChannelTable> {
+fn scan(opts: ScanArgs) -> Result<ChannelTable> {
     let mut dev = Device::open()?;
     dev.power_on()?;
     println!(
         "scanning {:.0}–{:.0} MHz step {:.0} MHz  (firmware V{}, {:?})",
-        opts.start_mhz,
-        opts.end_mhz,
-        opts.step_mhz,
-        dev.version.to_string(),
-        dev.variant
+        opts.band.start_mhz, opts.band.end_mhz, opts.band.step_mhz, dev.version, dev.variant
     );
 
     let mut table = ChannelTable::default();
-    let step = (opts.step_mhz * 1_000_000.0).round() as u32;
-    let mut mhz = opts.start_mhz;
     // The demod keeps reporting the previous mux after a failed retune, so the
     // lock bit alone is not trustworthy: require real TS bytes and a fresh PAT.
     let mut prev_pat: Option<Vec<u8>> = None;
+    let secs = opts.grab_secs.max(0.5);
 
-    while mhz <= opts.end_mhz + 0.001 {
-        let hz = (mhz * 1_000_000.0).round() as u32;
+    for hz in opts.band.freqs() {
+        let mhz = hz as f64 / 1e6;
         let t0 = Instant::now();
-        dev.power_cycle();
-        dev.set_freq(hz)?;
-        let mut locked = dev.wait_lock(Duration::from_millis(opts.dwell_ms));
-        if !locked {
-            // the first tune after a power cycle is occasionally slow
-            dev.power_cycle();
-            dev.set_freq(hz)?;
-            locked = dev.wait_lock(Duration::from_millis(1500));
-        }
-        if !locked {
+        if !dev.tune(
+            hz,
+            Duration::from_millis(opts.dwell_ms),
+            Duration::from_millis(1500),
+        )? {
             println!("{mhz:>7.3} MHz  -");
-            mhz += step as f64 / 1_000_000.0;
             continue;
         }
 
-        let mut grab = grab_mux(&mut dev, opts.grab_secs.max(0.5))?;
+        let mut grab = grab_mux(&mut dev, secs)?;
         // 2 KB of FIFO residue is not a signal: retry once from a clean state
         if grab.bytes < 8192 {
             dev.power_cycle();
             dev.set_freq(hz)?;
             dev.wait_lock(Duration::from_millis(1500));
-            grab = grab_mux(&mut dev, opts.grab_secs.max(0.5))?;
+            grab = grab_mux(&mut dev, secs)?;
         }
 
         let fresh = grab.bytes >= 8192 && grab.pat.is_some() && grab.pat != prev_pat;
@@ -319,13 +298,11 @@ fn scan(opts: ScanOpts) -> Result<ChannelTable> {
             }
             table.add_mux(hz, st, grab.programs);
         }
-        mhz += step as f64 / 1_000_000.0;
     }
 
     if let Some(p) = opts.names.as_ref().filter(|p| p.exists()) {
         apply_names(&mut table, p)?;
     }
-    dev.close();
     Ok(table)
 }
 
@@ -366,23 +343,16 @@ fn apply_names(table: &mut ChannelTable, path: &PathBuf) -> Result<()> {
 
 // ---------------------------------------------------------------------- meter
 
-struct MeterOpts {
-    freq_mhz: Option<f64>,
-    scan: bool,
-    start_mhz: f64,
-    end_mhz: f64,
-    step_mhz: f64,
-    settle_ms: u64,
-    interval_ms: u64,
-    json: bool,
-}
-
 fn bar(pct: f32, width: usize) -> String {
     let filled = ((pct.clamp(0.0, 100.0) / 100.0) * width as f32).round() as usize;
-    format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(width - filled))
+    format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(width - filled)
+    )
 }
 
-fn meter(opts: MeterOpts) -> Result<()> {
+fn meter(opts: MeterArgs) -> Result<()> {
     let mut dev = Device::open()?;
     dev.power_on()?;
 
@@ -394,7 +364,10 @@ fn meter(opts: MeterOpts) -> Result<()> {
     let _ = dev.set_freq(hz);
     dev.wait_lock(Duration::from_millis(opts.settle_ms));
 
-    println!("实时测量 {:.3} MHz —— 慢慢转天线，看峰值；Ctrl-C 退出", hz as f64 / 1e6);
+    println!(
+        "实时测量 {:.3} MHz —— 慢慢转天线，看峰值；Ctrl-C 退出",
+        hz as f64 / 1e6
+    );
     let (mut peak_pct, mut peak_snr) = (0u8, 0f32);
     loop {
         let st = dev.meter_status();
@@ -419,24 +392,18 @@ fn meter(opts: MeterOpts) -> Result<()> {
     }
 }
 
-fn sweep(dev: &mut Device, opts: &MeterOpts) -> Result<()> {
+fn sweep(dev: &mut Device, opts: &MeterArgs) -> Result<()> {
     let mut rows = Vec::new();
-    let mut mhz = opts.start_mhz;
+    let settle = Duration::from_millis(opts.settle_ms);
     println!(
         "扫频 {:.0}–{:.0} MHz（步进 {:.0}）—— 用于找最佳天线方向",
-        opts.start_mhz, opts.end_mhz, opts.step_mhz
+        opts.band.start_mhz, opts.band.end_mhz, opts.band.step_mhz
     );
-    while mhz <= opts.end_mhz + 0.001 {
-        let hz = (mhz * 1_000_000.0).round() as u32;
+    for hz in opts.band.freqs() {
+        let mhz = hz as f64 / 1e6;
         // a meter keeps going through dead frequencies: never abort the sweep
         let _ = dev.set_freq(hz);
-        let mut locked = dev.wait_lock(Duration::from_millis(opts.settle_ms));
-        if !locked {
-            // a cold frontend occasionally misses the first lock
-            dev.power_cycle();
-            let _ = dev.set_freq(hz);
-            locked = dev.wait_lock(Duration::from_millis(opts.settle_ms));
-        }
+        let locked = dev.lock_with_retry(hz, settle, settle).unwrap_or(false);
         let st = dev.meter_status();
         if !opts.json {
             print!(
@@ -459,7 +426,6 @@ fn sweep(dev: &mut Device, opts: &MeterOpts) -> Result<()> {
                 st.info.fec(),
             ));
         }
-        mhz += opts.step_mhz;
     }
     if !opts.json {
         println!();

@@ -63,13 +63,6 @@ pub struct Version {
 }
 
 impl Version {
-    pub fn to_string(&self) -> String {
-        format!(
-            "{}.{}.{}{}",
-            self.raw[0], self.raw[1], self.raw[2], self.raw[3]
-        )
-    }
-
     pub fn variant(&self) -> Variant {
         // the Linux driver keys off bytes 1..=3 == 08 20 44
         if self.raw[1] == 0x08 && self.raw[2] == 0x20 && self.raw[3] == 0x44 {
@@ -82,6 +75,16 @@ impl Version {
         } else {
             Variant::Nerc
         }
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}{}",
+            self.raw[0], self.raw[1], self.raw[2], self.raw[3]
+        )
     }
 }
 

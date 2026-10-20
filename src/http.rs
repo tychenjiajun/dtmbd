@@ -11,21 +11,21 @@
 //!   GET /                    → tiny status page for the phone
 
 use anyhow::{Context as AnyhowContext, Result};
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::catalog::{Channel, ChannelTable};
-use crate::tuner::{SignalReading, Tuner};
 use crate::ts::{self, PKT};
+use crate::tuner::{SignalReading, Tuner};
 
 #[derive(Clone)]
 struct App {
@@ -34,18 +34,28 @@ struct App {
     base: String,
 }
 
-pub fn run(tuner: Arc<Tuner>, table: Arc<ChannelTable>, listen: SocketAddr, base: String) -> Result<()> {
+pub fn run(
+    tuner: Arc<Tuner>,
+    table: Arc<ChannelTable>,
+    listen: SocketAddr,
+    base: String,
+) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let app_state = App {
-        tuner: tuner.clone(),
-        table: table.clone(),
-        base: base.clone(),
-    };
+    let app = App { tuner, table, base };
 
     rt.block_on(async move {
-        let app = Router::new()
+        let listener = tokio::net::TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("binding {listen}"))?;
+        println!(
+            "playlist: {}/playlist.m3u   ({} channels / {} muxes)",
+            app.base,
+            app.table.channels().count(),
+            app.table.muxes.len()
+        );
+        let router = Router::new()
             .route("/", get(index))
             .route("/playlist.m3u", get(playlist))
             .route("/p/{*path}", get(service))
@@ -54,18 +64,8 @@ pub fn run(tuner: Arc<Tuner>, table: Arc<ChannelTable>, listen: SocketAddr, base
             .route("/meter", get(meter_page))
             .route("/api/signal", get(api_signal))
             .route("/healthz", get(|| async { "ok" }))
-            .with_state(app_state);
-
-        let listener = tokio::net::TcpListener::bind(listen)
-            .await
-            .with_context(|| format!("binding {listen}"))?;
-        println!(
-            "playlist: {}/playlist.m3u   ({} channels / {} muxes)",
-            base,
-            table.channels().count(),
-            table.muxes.len()
-        );
-        axum::serve(listener, app).await?;
+            .with_state(app);
+        axum::serve(listener, router).await?;
         Ok::<(), anyhow::Error>(())
     })
 }
@@ -76,13 +76,17 @@ async fn index(State(app): State<App>) -> Html<String> {
     let snap = app.tuner.snapshot();
     let mut rows = String::new();
     for ch in app.table.channels() {
-        let live = if ch.freq_hz == snap.freq_hz { "●" } else { "" };
+        let live = if ch.freq_hz == snap.freq_hz {
+            "●"
+        } else {
+            ""
+        };
         rows.push_str(&format!(
             "<tr><td>{live}</td><td>{:.0}</td><td><a href=\"/p/{}.ts\">{}</a></td><td>{}</td></tr>",
             ch.freq_hz as f64 / 1e6,
             ch.sid,
             ch.label(),
-            ch.provider.clone().unwrap_or_default()
+            ch.provider.as_deref().unwrap_or("")
         ));
     }
     Html(format!(
@@ -171,7 +175,13 @@ async fn service(State(app): State<App>, Path(path): Path<String>) -> Response {
         }
         // let PSI arrive so the PID filter is exact (fallback: table PIDs)
         for _ in 0..15 {
-            if app.tuner.snapshot().programs.iter().any(|p| p.service_id == ch.sid) {
+            if app
+                .tuner
+                .snapshot()
+                .programs
+                .iter()
+                .any(|p| p.service_id == ch.sid)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -206,22 +216,14 @@ async fn api_signal(State(app): State<App>, Query(q): Query<SignalQuery>) -> Res
             format!("{e:#}"),
         )
             .into_response(),
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            e.to_string(),
-        )
-            .into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 async fn meter_page(State(app): State<App>) -> Html<String> {
-    // quick-jump buttons for the muxes we know about
-    let mut muxes: Vec<u32> = app.table.muxes.iter().map(|m| m.freq_hz).collect();
-    muxes.dedup();
-    let first_mhz = muxes
-        .first()
-        .map(|f| *f as f64 / 1e6)
-        .unwrap_or(698.0);
+    // quick-jump buttons for the muxes we know about (already unique + sorted)
+    let muxes: Vec<u32> = app.table.muxes.iter().map(|m| m.freq_hz).collect();
+    let first_mhz = muxes.first().map(|f| *f as f64 / 1e6).unwrap_or(698.0);
     let buttons = muxes
         .iter()
         .map(|f| {
@@ -337,7 +339,9 @@ fn stream(tuner: Arc<Tuner>, channel: Option<Channel>) -> Response {
     let mut state = FilterState {
         tuner: tuner.clone(),
         channel: channel.clone(),
-        wanted: channel.as_ref().map(pids_from_table),
+        wanted: channel
+            .as_ref()
+            .map(|ch| ts::wanted_pids(ch.pmt_pid, ch.pcr_pid, ch.streams.iter().map(|e| e.pid))),
         epoch,
         last_refresh: Instant::now(),
     };
@@ -386,14 +390,6 @@ fn stream(tuner: Arc<Tuner>, channel: Option<Channel>) -> Response {
     resp
 }
 
-fn pids_from_table(ch: &Channel) -> Vec<u16> {
-    let mut v = vec![ch.pmt_pid, ch.pcr_pid];
-    v.extend(ch.streams.iter().map(|e| e.pid));
-    v.sort_unstable();
-    v.dedup();
-    v
-}
-
 struct FilterState {
     tuner: Arc<Tuner>,
     channel: Option<Channel>,
@@ -425,11 +421,7 @@ impl FilterState {
 fn filter_chunk(chunk: &[u8], wanted: &[u16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(chunk.len() / 2);
     for pkt in chunk.chunks_exact(PKT) {
-        if pkt[0] != ts::SYNC {
-            continue;
-        }
-        let pid = (((pkt[1] & 0x1F) as u16) << 8) | pkt[2] as u16;
-        if ts::keep(pid, wanted) {
+        if pkt[0] == ts::SYNC && ts::keep(ts::pid(pkt), wanted) {
             out.extend_from_slice(pkt);
         }
     }

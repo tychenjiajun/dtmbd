@@ -121,11 +121,7 @@ pub fn payload_offset(pkt: &[u8]) -> Option<usize> {
     if afc & 0x2 != 0 {
         off += 1 + pkt[4] as usize;
     }
-    if off >= PKT {
-        None
-    } else {
-        Some(off)
-    }
+    if off >= PKT { None } else { Some(off) }
 }
 
 /// Collects one PSI section across packets of a PID.
@@ -210,13 +206,21 @@ pub struct Program {
 impl Program {
     /// PIDs a client needs to decode just this service.
     pub fn pids(&self) -> Vec<u16> {
-        let mut v = vec![self.pmt_pid, self.pmt_pid];
-        v.push(self.pcr_pid);
-        v.extend(self.streams.iter().map(|e| e.pid));
-        v.sort_unstable();
-        v.dedup();
-        v
+        wanted_pids(
+            self.pmt_pid,
+            self.pcr_pid,
+            self.streams.iter().map(|e| e.pid),
+        )
     }
+}
+
+/// PID set a client needs to decode one service (sorted, deduplicated).
+pub fn wanted_pids(pmt_pid: u16, pcr_pid: u16, streams: impl Iterator<Item = u16>) -> Vec<u16> {
+    let mut v = vec![pmt_pid, pcr_pid];
+    v.extend(streams);
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 pub fn stream_kind(t: u8) -> &'static str {
@@ -308,7 +312,8 @@ impl Analyzer {
         }
         if pat_pids != self.pat_pids {
             self.pat_pids = pat_pids.clone();
-            self.programs.retain(|sid, _| pat_pids.iter().any(|(p, _)| p == sid));
+            self.programs
+                .retain(|sid, _| pat_pids.iter().any(|(p, _)| p == sid));
         }
         for (sid, pmt_pid) in pat_pids {
             let entry = self.programs.entry(sid).or_insert(Program {
@@ -346,23 +351,17 @@ impl Analyzer {
             });
             i += 5 + es_len;
         }
-        if let Some(p) = self.programs.get_mut(&sid) {
-            p.pmt_pid = pmt_pid;
-            p.pcr_pid = pcr_pid;
-            p.streams = streams;
-        } else {
-            self.programs.insert(
-                sid,
-                Program {
-                    service_id: sid,
-                    pmt_pid,
-                    pcr_pid,
-                    name: None,
-                    provider: None,
-                    streams,
-                },
-            );
-        }
+        let p = self.programs.entry(sid).or_insert_with(|| Program {
+            service_id: sid,
+            pmt_pid,
+            pcr_pid: 0x1FFF,
+            name: None,
+            provider: None,
+            streams: Vec::new(),
+        });
+        p.pmt_pid = pmt_pid;
+        p.pcr_pid = pcr_pid;
+        p.streams = streams;
     }
 
     fn on_sdt(&mut self, s: Vec<u8>) {
@@ -553,7 +552,9 @@ mod tests {
     #[test]
     fn decodes_gb2312_service_names() {
         // "广东体育-HD" in GB2312, no charset marker (the common case on CN muxes)
-        let raw = [0xB9, 0xE3, 0xB6, 0xAB, 0xCC, 0xE5, 0xD3, 0xFD, b'-', b'H', b'D'];
+        let raw = [
+            0xB9, 0xE3, 0xB6, 0xAB, 0xCC, 0xE5, 0xD3, 0xFD, b'-', b'H', b'D',
+        ];
         assert_eq!(decode_dvb_string(&raw), "广东体育-HD");
         // 0x15 = UTF-8 marker
         let mut utf8 = vec![0x15];

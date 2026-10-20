@@ -11,13 +11,13 @@
 //!     always stops the pipe first;
 //!   * a wedged frontend only recovers through a power cycle (`power_cycle`).
 
-use anyhow::{bail, Context as AnyhowContext, Result};
+use anyhow::{Context as AnyhowContext, Result, bail};
 use rusb::{Context, DeviceHandle, Direction, Recipient, RequestType, UsbContext};
 use std::time::{Duration, Instant};
 
 pub mod proto;
 
-use proto::{req, SignalInfo, Status, Variant, Version};
+use proto::{SignalInfo, Status, Variant, Version, req};
 
 /// Control-transfer timeout: long enough for a NAKing frontend, short enough
 /// that a dead device does not hang the tuner thread.
@@ -45,9 +45,9 @@ impl Device {
                 continue;
             }
 
-            let handle = dev.open().with_context(|| {
-                format!("opening {:04x}:{:04x}", proto::VID, proto::PID)
-            })?;
+            let handle = dev
+                .open()
+                .with_context(|| format!("opening {:04x}:{:04x}", proto::VID, proto::PID))?;
 
             // Linux: a dvb-usb kernel module may already own the interface.
             let _ = handle.set_auto_detach_kernel_driver(true);
@@ -116,16 +116,17 @@ impl Device {
         let attempts = if retry { 2 } else { 1 };
         for attempt in 0..attempts {
             let res: rusb::Result<usize> = match (&mut data, dir) {
-                (Some(buf), Direction::In) => self
-                    .handle
-                    .read_control(req_type, request, proto::CTRL_VALUE, 0, buf, timeout),
-                (Some(buf), Direction::Out) => self
-                    .handle
-                    .write_control(req_type, request, proto::CTRL_VALUE, 0, buf, timeout),
-                (None, _) => {
-                    let mut empty: [u8; 0] = [];
+                (Some(buf), Direction::In) => {
                     self.handle
-                        .write_control(req_type, request, proto::CTRL_VALUE, 0, &mut empty, timeout)
+                        .read_control(req_type, request, proto::CTRL_VALUE, 0, buf, timeout)
+                }
+                (Some(buf), Direction::Out) => {
+                    self.handle
+                        .write_control(req_type, request, proto::CTRL_VALUE, 0, buf, timeout)
+                }
+                (None, _) => {
+                    self.handle
+                        .write_control(req_type, request, proto::CTRL_VALUE, 0, &[], timeout)
                 }
             };
 
@@ -144,7 +145,7 @@ impl Device {
                             "control {} 0x{request:02x} ({len} bytes)",
                             if dir == Direction::In { "IN" } else { "OUT" }
                         )
-                    })
+                    });
                 }
             }
         }
@@ -166,14 +167,13 @@ impl Device {
 
     /// Fire-and-forget OUT: short timeout, no retry. Used for the tuning kick,
     /// which legitimately NAKs on empty channels and must not slow a scan down.
-    fn ctrl_out_quiet(&mut self, request: u8, payload: &mut [u8], timeout: Duration) -> Result<usize> {
+    fn ctrl_out_quiet(
+        &mut self,
+        request: u8,
+        payload: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize> {
         self.ctrl(Direction::Out, request, Some(payload), timeout, false)
-    }
-
-    /// Status reads are short and never retried: empty channels NAK them and a
-    /// 6 s scan must not turn into a 60 s scan.
-    fn status_in(&mut self, request: u8, buf: &mut [u8]) -> Result<usize> {
-        self.ctrl(Direction::In, request, Some(buf), Duration::from_millis(250), false)
     }
 
     // --------------------------------------------------------------- commands
@@ -209,10 +209,16 @@ impl Device {
             false,
         );
         let mut payload = proto::encode_freq(hz);
-        self.ctrl(Direction::Out, req::SET_FREQ, Some(&mut payload), CTRL_TIMEOUT, true)?;
+        self.ctrl(
+            Direction::Out,
+            req::SET_FREQ,
+            Some(&mut payload),
+            CTRL_TIMEOUT,
+            true,
+        )?;
         // 1-byte kick is what the Letv firmware wants and locks ~200 ms sooner
         // than the 4-byte variant; NERC firmware ignores it either way.
-        let mut kick = proto::encode_freq(hz)[..1].to_vec();
+        let mut kick = payload[..1].to_vec();
         let _ = self.ctrl_out_quiet(req::LOCK, &mut kick, Duration::from_millis(200));
         Ok(())
     }
@@ -239,54 +245,73 @@ impl Device {
         }
     }
 
-    pub fn status(&mut self) -> Status {
-        let mut st = Status::default();
-        let mut b = [0u8; 4];
-
-        st.locked = self.locked();
-        let mut one = [0u8; 1];
-        st.has_signal = matches!(self.status_in(req::HAS_SIGNAL, &mut one), Ok(1) if one[0] != 0);
-        if matches!(self.status_in(req::STRENGTH, &mut b), Ok(4)) {
-            st.strength_pct = b[3].min(100);
+    /// Wait for lock, and on failure power-cycle + retune once: the frontend
+    /// frequently misses the first attempt after a wedge. Leaves the pipe off.
+    pub fn lock_with_retry(&mut self, hz: u32, first: Duration, retry: Duration) -> Result<bool> {
+        if self.wait_lock(first) {
+            return Ok(true);
         }
-        let mut snr = [0u8; 2];
-        if matches!(self.status_in(req::SNR, &mut snr), Ok(2)) {
-            st.snr_db = snr[0] as f32 + snr[1] as f32 / 100.0;
-        }
-        let mut info = [0u8; 6];
-        if matches!(self.status_in(req::SIGNAL_INFO, &mut info), Ok(6)) {
-            st.info = SignalInfo { raw: info };
-        }
-        st
+        self.power_cycle();
+        self.set_freq(hz)?;
+        Ok(self.wait_lock(retry))
     }
 
-    /// Fast triplet for the antenna meter: lock, strength, SNR with short
-    /// timeouts (an unlocked channel NAKs everything, so keep it snappy).
-    pub fn meter_status(&mut self) -> Status {
-        let d = Duration::from_millis(150);
-        let mut st = Status::default();
+    /// Tune from a clean power state — the reliable path used by scan/retune.
+    pub fn tune(&mut self, hz: u32, first: Duration, retry: Duration) -> Result<bool> {
+        self.power_cycle();
+        self.set_freq(hz)?;
+        self.lock_with_retry(hz, first, retry)
+    }
 
-        let mut b = [0u8; 1];
+    /// Read the frontend status. `d` bounds every control transfer; frontend
+    /// parameters are only queried once locked, and the meter skips the
+    /// has-signal bit it does not display.
+    fn sample(&mut self, d: Duration, has_signal: bool) -> Status {
+        let mut st = Status::default();
+        let mut one = [0u8; 1];
         st.locked = matches!(
-            self.ctrl(Direction::In, req::LOCK, Some(&mut b), d, false),
-            Ok(1) if b[0] == 1
+            self.ctrl(Direction::In, req::LOCK, Some(&mut one), d, false),
+            Ok(1) if one[0] == 1
         );
-        let mut s = [0u8; 4];
-        if matches!(self.ctrl(Direction::In, req::STRENGTH, Some(&mut s), d, false), Ok(4)) {
-            st.strength_pct = s[3].min(100);
+        if has_signal {
+            st.has_signal = matches!(
+                self.ctrl(Direction::In, req::HAS_SIGNAL, Some(&mut one), d, false),
+                Ok(1) if one[0] != 0
+            );
         }
-        let mut n = [0u8; 2];
-        if matches!(self.ctrl(Direction::In, req::SNR, Some(&mut n), d, false), Ok(2)) {
-            st.snr_db = n[0] as f32 + n[1] as f32 / 100.0;
+        let mut strength = [0u8; 4];
+        if matches!(
+            self.ctrl(Direction::In, req::STRENGTH, Some(&mut strength), d, false),
+            Ok(4)
+        ) {
+            st.strength_pct = strength[3].min(100);
+        }
+        let mut snr = [0u8; 2];
+        if matches!(
+            self.ctrl(Direction::In, req::SNR, Some(&mut snr), d, false),
+            Ok(2)
+        ) {
+            st.snr_db = snr[0] as f32 + snr[1] as f32 / 100.0;
         }
         if st.locked {
             let mut info = [0u8; 6];
-            if matches!(self.ctrl(Direction::In, req::SIGNAL_INFO, Some(&mut info), d, false), Ok(6))
-            {
+            if matches!(
+                self.ctrl(Direction::In, req::SIGNAL_INFO, Some(&mut info), d, false),
+                Ok(6)
+            ) {
                 st.info = SignalInfo { raw: info };
             }
         }
         st
+    }
+
+    pub fn status(&mut self) -> Status {
+        self.sample(Duration::from_millis(250), true)
+    }
+
+    /// Fast pair for the antenna meter: short timeouts, no has-signal probe.
+    pub fn meter_status(&mut self) -> Status {
+        self.sample(Duration::from_millis(150), false)
     }
 
     // ------------------------------------------------------------------- data
@@ -302,11 +327,6 @@ impl Device {
             Err(rusb::Error::Timeout) => Ok(0),
             Err(e) => Err(e).context("bulk read on endpoint 0x82"),
         }
-    }
-
-    pub fn close(mut self) {
-        let _ = self.stream(false);
-        let _ = self.handle.release_interface(proto::IFACE);
     }
 }
 

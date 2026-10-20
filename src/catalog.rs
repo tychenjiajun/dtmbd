@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::usb::proto::Status;
 use crate::ts::{EsInfo, Program};
+use crate::usb::proto::Status;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Channel {
@@ -155,9 +155,10 @@ impl ChannelTable {
         let mut n = 0;
         for m in self.muxes.iter_mut() {
             for c in m.channels.iter_mut() {
-                let hit = patch.names.iter().find(|e| {
-                    e.sid == c.sid && e.freq_hz.map(|f| f == c.freq_hz).unwrap_or(true)
-                });
+                let hit = patch
+                    .names
+                    .iter()
+                    .find(|e| e.sid == c.sid && e.freq_hz.map(|f| f == c.freq_hz).unwrap_or(true));
                 if let Some(e) = hit {
                     if c.name.as_deref() != Some(e.name.as_str()) {
                         c.name = Some(e.name.clone());

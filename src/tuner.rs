@@ -17,13 +17,13 @@
 
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-use crate::ts::{Aligner, Analyzer, Program, PKT};
-use crate::usb::proto::Status;
+use crate::ts::{Aligner, Analyzer, PKT, Program};
 use crate::usb::Device;
+use crate::usb::proto::Status;
 
 /// ~64 KB chunks, 128 slots: slow clients drop old data instead of blocking the tuner.
 const CAPACITY: usize = 128;
@@ -135,26 +135,41 @@ impl Tuner {
         }
     }
 
+    /// Send a command to the worker and wait for its typed reply.
+    fn ask<T>(
+        &self,
+        cmd: impl FnOnce(mpsc::Sender<std::result::Result<T, String>>) -> Cmd,
+        timeout: Duration,
+        what: &str,
+    ) -> anyhow::Result<T> {
+        let (tx, rx) = mpsc::channel();
+        self.cmd_tx
+            .send(cmd(tx))
+            .map_err(|_| anyhow::anyhow!("tuner thread is gone"))?;
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(anyhow::anyhow!(e)),
+            Err(_) => Err(anyhow::anyhow!("{what} timed out")),
+        }
+    }
+
     /// One measurement at `hz` (or the current probe frequency when `None`).
     /// Enters meter mode, which pauses streaming until [`Tuner::meter_stop`].
     pub fn meter(&self, hz: Option<u32>) -> anyhow::Result<SignalReading> {
-        let (tx, rx) = mpsc::channel();
-        self.cmd_tx
-            .send(Cmd::Meter { hz, reply: tx })
-            .map_err(|_| anyhow::anyhow!("tuner thread is gone"))?;
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(r)) => Ok(r),
-            Ok(Err(e)) => Err(anyhow::anyhow!(e)),
-            Err(_) => Err(anyhow::anyhow!("meter timed out")),
-        }
+        self.ask(
+            |reply| Cmd::Meter { hz, reply },
+            Duration::from_secs(10),
+            "meter",
+        )
     }
 
     /// Leave meter mode; viewers reconnect on their next request.
     pub fn meter_stop(&self) {
-        let (tx, rx) = mpsc::channel();
-        if self.cmd_tx.send(Cmd::MeterStop { reply: tx }).is_ok() {
-            let _ = rx.recv_timeout(Duration::from_secs(4));
-        }
+        let _ = self.ask(
+            |reply| Cmd::MeterStop { reply },
+            Duration::from_secs(4),
+            "meter stop",
+        );
     }
 
     pub fn psi_snapshot(&self) -> Vec<(u16, Vec<u8>)> {
@@ -164,15 +179,7 @@ impl Tuner {
     /// Blocking: ask the worker to go to `hz` and wait until it is streaming.
     /// Call from `spawn_blocking`, never from an async task directly.
     pub fn tune_to(&self, hz: u32, timeout: Duration) -> anyhow::Result<()> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.cmd_tx
-            .send(Cmd::Tune { hz, reply: reply_tx })
-            .map_err(|_| anyhow::anyhow!("tuner thread is gone"))?;
-        match reply_rx.recv_timeout(timeout) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(anyhow::anyhow!(e)),
-            Err(_) => Err(anyhow::anyhow!("timed out waiting for lock")),
-        }
+        self.ask(|reply| Cmd::Tune { hz, reply }, timeout, "waiting for lock")
     }
 
     // ------------------------------------------------------------- worker side
@@ -260,7 +267,10 @@ impl Tuner {
                         backoff = Duration::from_millis(200);
                     }
                     Err(e) => {
-                        (log)(&format!("recover {:.3} MHz failed: {e:#}", target as f64 / 1e6));
+                        (log)(&format!(
+                            "recover {:.3} MHz failed: {e:#}",
+                            target as f64 / 1e6
+                        ));
                         dev = None;
                         tuned = None;
                         std::thread::sleep(backoff);
@@ -272,7 +282,11 @@ impl Tuner {
             }
 
             // 3. pump bytes to subscribers
-            let n = match dev.as_mut().unwrap().read_ts(&mut buf, Duration::from_millis(200)) {
+            let n = match dev
+                .as_mut()
+                .unwrap()
+                .read_ts(&mut buf, Duration::from_millis(200))
+            {
                 Ok(n) => n,
                 Err(e) => {
                     (log)(&format!("usb error: {e:#}; reopening"));
@@ -321,10 +335,6 @@ impl Tuner {
                 window_start = Instant::now();
             }
         }
-
-        if let Some(d) = dev.take() {
-            d.close();
-        }
     }
 
     /// Tune for measurement (streaming stopped) and take one reading.
@@ -342,15 +352,10 @@ impl Tuner {
 
         if let Some(hz) = hz {
             if *meter != Some(hz) {
-                // pause the pipe: control reads are unreliable while it streams
-                let _ = d.stream(false);
                 d.set_freq(hz)?;
-                if !d.wait_lock(Duration::from_millis(1500)) {
-                    // cold frontend: same recipe as the scanner
-                    d.power_cycle();
-                    d.set_freq(hz)?;
-                    d.wait_lock(Duration::from_millis(2000));
-                }
+                // a reading is still useful without lock, so a miss is not fatal
+                let _ =
+                    d.lock_with_retry(hz, Duration::from_millis(1500), Duration::from_millis(2000));
                 *meter = Some(hz);
                 *tuned = None;
             }
@@ -379,31 +384,16 @@ impl Tuner {
             let d = Device::open()?;
             (log)(&format!(
                 "device: firmware V{} ({:?}) bus {:03} addr {:03}",
-                d.version.to_string(),
-                d.variant,
-                d.bus,
-                d.address
+                d.version, d.variant, d.bus, d.address
             ));
             *dev = Some(d);
         }
         let d = dev.as_mut().unwrap();
         // the frontend wedges easily: always start a retune from a clean power state
-        d.power_cycle();
-        d.set_freq(hz)?;
-
-        let mut locked = d.wait_lock(Duration::from_millis(2500));
-        if !locked {
-            // common on the first tune after a wedge: one power cycle fixes it
-            d.power_cycle();
-            d.set_freq(hz)?;
-            locked = d.wait_lock(Duration::from_millis(2500));
-        }
-        if !locked {
+        if !d.tune(hz, Duration::from_millis(2500), Duration::from_millis(2500))? {
             anyhow::bail!("no demod lock on {:.3} MHz (antenna?)", hz as f64 / 1e6);
         }
 
-        // read signal info *before* opening the pipe: control transfers while the
-        // FX2 is streaming stall the bulk pipe on this hardware
         // signal info must be read before the pipe opens: control transfers while
         // the FX2 is streaming stall the bulk endpoint on this hardware
         let st = d.status();
@@ -414,10 +404,7 @@ impl Tuner {
             let mut g = self.inner.lock().unwrap();
             g.analyzer = Analyzer::default();
             g.freq_hz = hz;
-            g.status = Status {
-                tuned_hz: hz,
-                ..st
-            };
+            g.status = Status { tuned_hz: hz, ..st };
             g.resyncs = 0;
         }
         self.epoch.fetch_add(1, Ordering::Relaxed);
