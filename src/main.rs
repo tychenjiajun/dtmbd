@@ -60,6 +60,31 @@ enum Cmd {
         #[arg(long)]
         save: Option<PathBuf>,
     },
+    /// Antenna meter: live signal readings on one frequency, or a fast sweep
+    /// to find the strongest mux while aiming the antenna.
+    Meter {
+        /// Frequency to watch. Omit (or pass --scan) to sweep the band.
+        #[arg(long)]
+        freq_mhz: Option<f64>,
+        /// Sweep the band and rank every mux by signal quality.
+        #[arg(long)]
+        scan: bool,
+        #[arg(long, default_value_t = 474.0)]
+        start_mhz: f64,
+        #[arg(long, default_value_t = 866.0)]
+        end_mhz: f64,
+        #[arg(long, default_value_t = 8.0)]
+        step_mhz: f64,
+        /// How long to wait for lock on each frequency while sweeping.
+        #[arg(long, default_value_t = 700)]
+        settle_ms: u64,
+        /// Live refresh interval.
+        #[arg(long, default_value_t = 300)]
+        interval_ms: u64,
+        /// Machine readable output (sweep only).
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the IPTV server (this is what systemd starts).
     Serve {
         #[arg(long, default_value = "0.0.0.0:8080")]
@@ -107,6 +132,25 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Meter {
+            freq_mhz,
+            scan,
+            start_mhz,
+            end_mhz,
+            step_mhz,
+            settle_ms,
+            interval_ms,
+            json,
+        } => meter(MeterOpts {
+            freq_mhz,
+            scan,
+            start_mhz,
+            end_mhz,
+            step_mhz,
+            settle_ms,
+            interval_ms,
+            json,
+        }),
         Cmd::Serve {
             bind,
             table,
@@ -314,5 +358,152 @@ fn apply_names(table: &mut ChannelTable, path: &PathBuf) -> Result<()> {
         .with_context(|| format!("parsing name patch {}", path.display()))?;
     let n = table.apply_names(&patch);
     println!("names: {n} channel(s) renamed from {}", path.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------- meter
+
+struct MeterOpts {
+    freq_mhz: Option<f64>,
+    scan: bool,
+    start_mhz: f64,
+    end_mhz: f64,
+    step_mhz: f64,
+    settle_ms: u64,
+    interval_ms: u64,
+    json: bool,
+}
+
+fn bar(pct: f32, width: usize) -> String {
+    let filled = ((pct.clamp(0.0, 100.0) / 100.0) * width as f32).round() as usize;
+    format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(width - filled))
+}
+
+fn meter(opts: MeterOpts) -> Result<()> {
+    let mut dev = Device::open()?;
+    dev.power_on()?;
+
+    if opts.scan || opts.freq_mhz.is_none() {
+        return sweep(&mut dev, &opts);
+    }
+
+    let hz = (opts.freq_mhz.unwrap() * 1e6).round() as u32;
+    let _ = dev.set_freq(hz);
+    dev.wait_lock(Duration::from_millis(opts.settle_ms));
+
+    println!("实时测量 {:.3} MHz —— 慢慢转天线，看峰值；Ctrl-C 退出", hz as f64 / 1e6);
+    let (mut peak_pct, mut peak_snr) = (0u8, 0f32);
+    loop {
+        let st = dev.meter_status();
+        peak_pct = peak_pct.max(st.strength_pct);
+        peak_snr = peak_snr.max(st.snr_db);
+        print!(
+            "\x1b[2K\r{:.3} MHz  {}  {:>3}% {}  SNR {:>5.1} dB  {} 峰值 {:>3}% / {:.1} dB   {} {} {}",
+            hz as f64 / 1e6,
+            if st.locked { "LOCK" } else { "----" },
+            st.strength_pct,
+            bar(st.strength_pct as f32, 16),
+            st.snr_db,
+            bar(st.snr_db / 30.0 * 100.0, 16),
+            peak_pct,
+            peak_snr,
+            st.info.modulation(),
+            st.info.guard_interval(),
+            st.info.fec(),
+        );
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        std::thread::sleep(Duration::from_millis(opts.interval_ms));
+    }
+}
+
+fn sweep(dev: &mut Device, opts: &MeterOpts) -> Result<()> {
+    let mut rows = Vec::new();
+    let mut mhz = opts.start_mhz;
+    println!(
+        "扫频 {:.0}–{:.0} MHz（步进 {:.0}）—— 用于找最佳天线方向",
+        opts.start_mhz, opts.end_mhz, opts.step_mhz
+    );
+    while mhz <= opts.end_mhz + 0.001 {
+        let hz = (mhz * 1_000_000.0).round() as u32;
+        // a meter keeps going through dead frequencies: never abort the sweep
+        let _ = dev.set_freq(hz);
+        let mut locked = dev.wait_lock(Duration::from_millis(opts.settle_ms));
+        if !locked {
+            // a cold frontend occasionally misses the first lock
+            dev.power_cycle();
+            let _ = dev.set_freq(hz);
+            locked = dev.wait_lock(Duration::from_millis(opts.settle_ms));
+        }
+        let st = dev.meter_status();
+        if !opts.json {
+            print!(
+                "\x1b[2K\r{:>7.3} MHz  {}  {:>3}% {}  SNR {:>5.1} dB",
+                mhz,
+                if locked { "LOCK" } else { "----" },
+                st.strength_pct,
+                bar(st.strength_pct as f32, 12),
+                st.snr_db
+            );
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+        }
+        if locked {
+            rows.push((
+                hz,
+                st.strength_pct,
+                st.snr_db,
+                st.info.modulation(),
+                st.info.guard_interval(),
+                st.info.fec(),
+            ));
+        }
+        mhz += opts.step_mhz;
+    }
+    if !opts.json {
+        println!();
+    }
+
+    rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    if opts.json {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|(hz, pct, snr, m, gi, fec)| {
+                serde_json::json!({
+                    "freq_hz": hz,
+                    "strength_pct": pct,
+                    "snr_db": snr,
+                    "modulation": m,
+                    "guard_interval": gi,
+                    "fec": fec,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&arr)?);
+        return Ok(());
+    }
+
+    println!("\n锁定 {} 个频点（按 SNR 排序）：", rows.len());
+    for (i, (hz, pct, snr, m, gi, fec)) in rows.iter().enumerate() {
+        println!(
+            "{} {:>7.3} MHz  {:>3}%  SNR {:>5.1} dB  {}  {} {} {}",
+            if i == 0 { "★" } else { " " },
+            *hz as f64 / 1e6,
+            pct,
+            snr,
+            bar(*snr / 30.0 * 100.0, 20),
+            m,
+            gi,
+            fec
+        );
+    }
+    if let Some((hz, _, snr, ..)) = rows.first() {
+        println!(
+            "\n最佳：{:.3} MHz（SNR {:.1} dB）—— 转天线到这个方向时看 SNR 最大",
+            *hz as f64 / 1e6,
+            snr
+        );
+    } else {
+        println!("\n一个都没锁上：检查天线、馈线、供电");
+    }
     Ok(())
 }

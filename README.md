@@ -73,6 +73,48 @@ L1 usb      vendor 控制协议 + bulk TS（libusb，无内核驱动）
   多音轨/字幕的 PID 全保留（切音轨、字幕不用重启）。
 - **自愈**：USB 读空 6 秒 → power-cycle 前端；USB 报错 → 重开设备；daemon 崩了 systemd 拉起。
 
+## 天线调试（场强仪）
+
+装天线最难的是"转到哪个角度"——这两个工具就是为它做的：
+
+**手机上（推荐，人站在天线上）**
+
+```
+http://dtmb.local:8080/meter
+```
+
+点频点 → 点“开始”，然后慢慢转天线。页面实时显示强度条、SNR 条和**峰值保持**，
+转一圈下来看峰值最大处就是最佳角度。点“恢复正常播放”退出调试。
+
+**命令行（树莓派本机 / 笔记本；daemon 运行时会占用设备，先 `systemctl stop dtmb`）**
+
+```bash
+dtmb meter --freq-mhz 522          # 实时读数 + 峰值保持，Ctrl-C 退出
+dtmb meter --scan                  # 全频段扫一遍，按 SNR 排序，标出最佳频点
+dtmb meter --scan --start-mhz 470 --end-mhz 560 --settle-ms 500
+dtmb meter --scan --json           # 给脚本用
+```
+
+输出示例：
+
+```
+★ 522.000 MHz  100%  SNR  21.9 dB  ███████████████░░░░░  4QAM PN595 0.8
+  514.000 MHz  100%  SNR  21.5 dB  ██████████████░░░░░░  16QAM PN945 0.8
+  506.000 MHz  100%  SNR  19.6 dB  █████████████░░░░░░░  16QAM PN420 0.8
+```
+
+怎么判断：
+
+| 指标 | 含义 | 参考值 |
+|---|---|---|
+| `snr_db` | **最重要的指标**，决定画质 | ≥15 dB 稳定；10–15 临界；<10 花屏 |
+| `strength_pct` | AGC 百分比，容易饱和到 100% | 参考意义有限，别只盯它 |
+| `LOCK` | 解调器是否锁上 | 锁不上就换方向/换位置 |
+| `modulation` | 该频点用 4QAM/16QAM/64QAM | 与天线无关，但 64QAM 对 SNR 要求更高 |
+
+技巧：先看 SNR 条，把天线转到 SNR 最高；再看 `strength_pct` 微调 1–2 度；
+测完记得点“恢复正常播放”，否则电视那边会一直暂停。
+
 ## 命令行
 
 ```bash
@@ -80,6 +122,7 @@ dtmb scan                      # 重新扫频建表（搬家/换天线后跑）
 dtmb scan --names presets/guangzhou-foshan.json
 dtmb scan --start-mhz 171 --end-mhz 219     # 单独扫 VHF（部分城市有）
 dtmb serve                     # 前台跑（调试用，systemd 用同样参数）
+dtmb meter --freq-mhz 522      # 天线调试场强仪
 ```
 
 `/etc/dtmb/names.json` 可选：有些频点的 PMT 里没有 SDT 台名，用这个补丁按 `freq+sid` 命名

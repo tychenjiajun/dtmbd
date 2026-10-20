@@ -50,6 +50,28 @@ enum Cmd {
         hz: u32,
         reply: mpsc::Sender<std::result::Result<(), String>>,
     },
+    /// Antenna meter: stop streaming, tune to `hz` (or keep the current probe
+    /// frequency when `None`), and report one signal reading.
+    Meter {
+        hz: Option<u32>,
+        reply: mpsc::Sender<std::result::Result<SignalReading, String>>,
+    },
+    /// Leave meter mode and resume whatever the viewers were watching.
+    MeterStop {
+        reply: mpsc::Sender<std::result::Result<(), String>>,
+    },
+}
+
+/// One frontend measurement — what you read while aiming an antenna.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SignalReading {
+    pub freq_hz: u32,
+    pub locked: bool,
+    pub strength_pct: u8,
+    pub snr_db: f32,
+    pub modulation: &'static str,
+    pub guard_interval: &'static str,
+    pub fec: &'static str,
 }
 
 pub struct Tuner {
@@ -110,6 +132,28 @@ impl Tuner {
         }
     }
 
+    /// One measurement at `hz` (or the current probe frequency when `None`).
+    /// Enters meter mode, which pauses streaming until [`Tuner::meter_stop`].
+    pub fn meter(&self, hz: Option<u32>) -> anyhow::Result<SignalReading> {
+        let (tx, rx) = mpsc::channel();
+        self.cmd_tx
+            .send(Cmd::Meter { hz, reply: tx })
+            .map_err(|_| anyhow::anyhow!("tuner thread is gone"))?;
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => Err(anyhow::anyhow!(e)),
+            Err(_) => Err(anyhow::anyhow!("meter timed out")),
+        }
+    }
+
+    /// Leave meter mode; viewers reconnect on their next request.
+    pub fn meter_stop(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.cmd_tx.send(Cmd::MeterStop { reply: tx }).is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(4));
+        }
+    }
+
     pub fn psi_snapshot(&self) -> Vec<(u16, Vec<u8>)> {
         self.inner.lock().unwrap().analyzer.psi_snapshot()
     }
@@ -134,6 +178,7 @@ impl Tuner {
         let mut dev: Option<Device> = None;
         let mut want: Option<u32> = None;
         let mut tuned: Option<u32> = None;
+        let mut meter: Option<u32> = None;
         let mut aligner = Aligner::default();
         let mut buf = vec![0u8; 64 * 1024];
         let mut empty_streak = 0u32;
@@ -172,8 +217,23 @@ impl Tuner {
                     }
                     let _ = reply.send(res.map_err(|e| format!("{e:#}")));
                 }
+                Ok(Cmd::Meter { hz, reply }) => {
+                    let res = self.meter_step(&mut dev, &mut meter, &mut tuned, hz);
+                    let _ = reply.send(res.map_err(|e| format!("{e:#}")));
+                }
+                Ok(Cmd::MeterStop { reply }) => {
+                    meter = None;
+                    // force the normal path to re-tune and restart streaming
+                    tuned = None;
+                    let _ = reply.send(Ok(()));
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            // meter mode owns the frontend: no streaming, no auto-recovery noise
+            if meter.is_some() {
+                continue;
             }
 
             let Some(target) = want else { continue };
@@ -253,6 +313,47 @@ impl Tuner {
         if let Some(d) = dev.take() {
             d.close();
         }
+    }
+
+    /// Tune for measurement (streaming stopped) and take one reading.
+    fn meter_step(
+        &self,
+        dev: &mut Option<Device>,
+        meter: &mut Option<u32>,
+        tuned: &mut Option<u32>,
+        hz: Option<u32>,
+    ) -> anyhow::Result<SignalReading> {
+        if dev.is_none() {
+            *dev = Some(Device::open()?);
+        }
+        let d = dev.as_mut().unwrap();
+
+        if let Some(hz) = hz {
+            if *meter != Some(hz) {
+                // pause the pipe: control reads are unreliable while it streams
+                let _ = d.stream(false);
+                d.set_freq(hz)?;
+                if !d.wait_lock(Duration::from_millis(1500)) {
+                    // cold frontend: same recipe as the scanner
+                    d.power_cycle();
+                    d.set_freq(hz)?;
+                    d.wait_lock(Duration::from_millis(2000));
+                }
+                *meter = Some(hz);
+                *tuned = None;
+            }
+        }
+        let freq = (*meter).ok_or_else(|| anyhow::anyhow!("not in meter mode"))?;
+        let st = d.meter_status();
+        Ok(SignalReading {
+            freq_hz: freq,
+            locked: st.locked,
+            strength_pct: st.strength_pct,
+            snr_db: st.snr_db,
+            modulation: st.info.modulation(),
+            guard_interval: st.info.guard_interval(),
+            fec: st.info.fec(),
+        })
     }
 
     fn retune(

@@ -67,6 +67,9 @@ impl Device {
 
             // a previous process may have died mid-stream, leaving the FIFO full
             this.power_cycle();
+            // the tuner PLL needs a moment after power-on or the first set_freq
+            // is silently dropped (costs ~2 s of retries later)
+            std::thread::sleep(Duration::from_millis(300));
             let _ = this.ctrl_out(req::STREAM_OFF, &[]);
 
             let mut v = [0u8; 4];
@@ -250,6 +253,35 @@ impl Device {
         let mut info = [0u8; 6];
         if matches!(self.status_in(req::SIGNAL_INFO, &mut info), Ok(6)) {
             st.info = SignalInfo { raw: info };
+        }
+        st
+    }
+
+    /// Fast triplet for the antenna meter: lock, strength, SNR with short
+    /// timeouts (an unlocked channel NAKs everything, so keep it snappy).
+    pub fn meter_status(&mut self) -> Status {
+        let d = Duration::from_millis(150);
+        let mut st = Status::default();
+
+        let mut b = [0u8; 1];
+        st.locked = matches!(
+            self.ctrl(Direction::In, req::LOCK, Some(&mut b), d, false),
+            Ok(1) if b[0] == 1
+        );
+        let mut s = [0u8; 4];
+        if matches!(self.ctrl(Direction::In, req::STRENGTH, Some(&mut s), d, false), Ok(4)) {
+            st.strength_pct = s[3].min(100);
+        }
+        let mut n = [0u8; 2];
+        if matches!(self.ctrl(Direction::In, req::SNR, Some(&mut n), d, false), Ok(2)) {
+            st.snr_db = n[0] as f32 + n[1] as f32 / 100.0;
+        }
+        if st.locked {
+            let mut info = [0u8; 6];
+            if matches!(self.ctrl(Direction::In, req::SIGNAL_INFO, Some(&mut info), d, false), Ok(6))
+            {
+                st.info = SignalInfo { raw: info };
+            }
         }
         st
     }

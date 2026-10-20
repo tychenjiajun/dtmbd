@@ -9,7 +9,7 @@
 
 use anyhow::{Context as AnyhowContext, Result};
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -21,7 +21,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::catalog::{Channel, ChannelTable};
-use crate::tuner::Tuner;
+use crate::tuner::{SignalReading, Tuner};
 use crate::ts::{self, PKT};
 
 #[derive(Clone)]
@@ -48,6 +48,8 @@ pub fn run(tuner: Arc<Tuner>, table: Arc<ChannelTable>, listen: SocketAddr, base
             .route("/p/{*path}", get(service))
             .route("/stream.ts", get(full_mux))
             .route("/status.json", get(status))
+            .route("/meter", get(meter_page))
+            .route("/api/signal", get(api_signal))
             .route("/healthz", get(|| async { "ok" }))
             .with_state(app_state);
 
@@ -174,6 +176,140 @@ async fn service(State(app): State<App>, Path(path): Path<String>) -> Response {
     }
 
     stream(app.tuner.clone(), Some(ch))
+}
+
+// ---------------------------------------------------------------------- meter
+
+#[derive(serde::Deserialize)]
+struct SignalQuery {
+    /// MHz to measure. Omit to sample the frequency already being probed.
+    freq: Option<f64>,
+    /// `stop=1` leaves meter mode and resumes normal playback.
+    stop: Option<u8>,
+}
+
+async fn api_signal(State(app): State<App>, Query(q): Query<SignalQuery>) -> Response {
+    if q.stop.is_some() {
+        let tuner = app.tuner.clone();
+        let _ = tokio::task::spawn_blocking(move || tuner.meter_stop()).await;
+        return axum::Json(serde_json::json!({ "stopped": true })).into_response();
+    }
+    let hz = q.freq.map(|f| (f * 1e6).round() as u32);
+    let tuner = app.tuner.clone();
+    match tokio::task::spawn_blocking(move || tuner.meter(hz)).await {
+        Ok(Ok(r)) => axum::Json::<SignalReading>(r).into_response(),
+        Ok(Err(e)) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("{e:#}"),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            e.to_string(),
+        )
+            .into_response(),
+    }
+}
+
+async fn meter_page(State(app): State<App>) -> Html<String> {
+    // quick-jump buttons for the muxes we know about
+    let mut muxes: Vec<u32> = app.table.muxes.iter().map(|m| m.freq_hz).collect();
+    muxes.dedup();
+    let first_mhz = muxes
+        .first()
+        .map(|f| *f as f64 / 1e6)
+        .unwrap_or(698.0);
+    let buttons = muxes
+        .iter()
+        .map(|f| {
+            format!(
+                "<button onclick=\"pick({mhz})\">{mhz} MHz</button>",
+                mhz = *f as f64 / 1e6
+            )
+        })
+        .collect::<String>();
+
+    Html(format!(
+        r#"<!doctype html><meta charset="utf-8"><title>天线调试 - dtmb</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font:16px/1.4 system-ui,sans-serif;margin:1rem;background:#111;color:#eee;max-width:34rem}}
+h1{{font-size:1.2rem;margin:.2rem 0 1rem}}
+.row{{margin:.9rem 0}}
+.label{{display:flex;justify-content:space-between;font-size:.95rem;color:#9ab}}
+.big{{font-size:2.2rem;font-weight:700;font-variant-numeric:tabular-nums}}
+.bar{{height:26px;background:#222;border-radius:6px;overflow:hidden;margin-top:.25rem}}
+.fill{{height:100%;width:0;background:#2ecc71;transition:width .25s}}
+.fill.snr{{background:#4aa3ff}}
+button{{font:inherit;padding:.5rem .8rem;margin:.2rem .3rem .2rem 0;border-radius:8px;
+  border:1px solid #444;background:#1b1b1b;color:#eee}}
+input{{font:inherit;padding:.5rem;width:6.5rem;background:#1b1b1b;color:#eee;border:1px solid #444;
+  border-radius:8px}}
+.lock{{display:inline-block;padding:.15rem .6rem;border-radius:999px;font-size:.85rem}}
+.on{{background:#1e6b3a;color:#d7ffe6}} .off{{background:#5a1f1f;color:#ffd7d7}}
+small{{color:#888}}
+</style>
+<h1>天线调试 · <span id="freqLabel">–</span> MHz <span id="lock" class="lock off">未锁定</span></h1>
+
+<div class="row"><div class="label"><span>强度</span><span id="strTxt">–</span></div>
+<div class="bar"><div class="fill" id="strBar"></div></div></div>
+
+<div class="row"><div class="label"><span>信噪比 SNR</span><span id="snrTxt">–</span></div>
+<div class="bar"><div class="fill snr" id="snrBar"></div></div></div>
+
+<div class="row"><div class="label"><span>峰值（慢慢转天线，盯这个）</span><span id="peakTxt">–</span></div>
+<div class="bar"><div class="fill" id="peakBar" style="background:#f5a623"></div></div></div>
+
+<div class="row">
+  <input id="freq" type="number" step="1" value="{first_mhz}"> MHz
+  <button onclick="pick(+document.getElementById('freq').value)">开始</button>
+  <button onclick="resetPeak()">清峰值</button>
+  <button onclick="stopMeter()">恢复正常播放</button>
+</div>
+<div class="row">{buttons}</div>
+<p><small>提示：点“开始”后转天线，看“峰值”和 SNR。SNR ≥ 15 dB 基本稳定，&lt; 10 dB 会花屏。
+调试期间播放会暂停，点“恢复正常播放”即可回到电视频道。</small></p>
+
+<script>
+let freq = {first_mhz}, peak = 0, peakSnr = 0, running = false;
+function pick(f) {{
+  freq = f; peak = 0; peakSnr = 0; running = true;
+  document.getElementById('freq').value = f;
+  poll();
+}}
+function resetPeak() {{ peak = 0; peakSnr = 0; }}
+async function stopMeter() {{
+  running = false;
+  await fetch('/api/signal?stop=1');
+}}
+async function poll() {{
+  try {{
+    const r = await fetch('/api/signal?freq=' + freq, {{cache:'no-store'}});
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    document.getElementById('freqLabel').textContent = (d.freq_hz/1e6).toFixed(3);
+    const lock = document.getElementById('lock');
+    lock.textContent = d.locked ? '已锁定' : '未锁定';
+    lock.className = 'lock ' + (d.locked ? 'on' : 'off');
+    document.getElementById('strTxt').textContent = d.strength_pct + '%';
+    document.getElementById('strBar').style.width = d.strength_pct + '%';
+    document.getElementById('snrTxt').textContent = d.snr_db.toFixed(1) + ' dB';
+    document.getElementById('snrBar').style.width = Math.min(100, d.snr_db/30*100) + '%';
+    peak = Math.max(peak, d.strength_pct);
+    peakSnr = Math.max(peakSnr, d.snr_db);
+    document.getElementById('peakTxt').textContent = peak + '% / ' + peakSnr.toFixed(1) + ' dB';
+    document.getElementById('peakBar').style.width = peak + '%';
+  }} catch (e) {{
+    document.getElementById('lock').textContent = '测量失败';
+    document.getElementById('lock').className = 'lock off';
+  }}
+  // self-scheduling: never pile up requests while a cold tune takes seconds
+  if (running) setTimeout(poll, 600);
+}}
+// no auto-start: opening this page must not interrupt playback
+document.getElementById('freq').value = {first_mhz};
+</script>"#,
+    ))
 }
 
 // ------------------------------------------------------------------ streaming
