@@ -1,120 +1,120 @@
 # dtmb
 
-把 **DTMB（GB 20600-2006）USB 电视棒** 变成 VLC / mpv / Kodi / TiviMate 能直接打开的
-**IPTV 串流服务器**。无需内核驱动、无需固件下载、macOS / Linux / Windows 同一份代码。
+一根 DTMB 电视棒 + 一台小电脑（树莓派 / N100 小主机）+ WiFi = **你家的 IPTV 源**。
+电视不用拉同轴线，也不用在电视上插 USB：安卓电视装个 IPTV 播放器，订阅一个 M3U 地址就行。
 
 ```
-USB dongle 04b4:1004 ──libusb bulk──▶ Aligner ──▶ PSI demux ──▶ broadcast hub ──┬─▶ /stream.ts   整频点
-                                                                                 ├─▶ /p/<sid>.ts 单节目(PID过滤)
-                                                                                 ├─▶ /playlist.m3u IPTV 播放列表
-                                                                                 └─▶ UDP <addr>
+  同轴天线
+     │
+  ┌──▼──────────────┐        WiFi / LAN        ┌──────────────────┐
+  │ 树莓派 + 电视棒  │ ─── HTTP MPEG-TS ───────▶ │ 安卓电视 / 盒子   │
+  │ dtmb serve :8080│   http://dtmb.local:8080  │ IPTV 播放器      │
+  └─────────────────┘   /playlist.m3u           └──────────────────┘
 ```
 
-## 实测（广州，天线 + 一根 NERC/Letv 棒）
-
-```
-$ dtmb scan --names presets/guangzhou-foshan.json
-506.000 MHz  LOCK  str 100%  snr  20.5 dB  tsid 1  16QAM  4 ch
-   └ 广东体育-HD / 广东卫视-HD / 广东少儿-HD / 广东影视-HD
-514.000 MHz  LOCK  str 100%  snr  21.4 dB  tsid 3  16QAM  19 ch
-   └ CCTV-1/2/4/10/12/13/14/15 + CNR01…CNR16（广播）
-522.000 MHz  LOCK  str 100%  snr  22.1 dB  tsid 4  4QAM   4 ch
-   └ CCTV-17 / CCTV-9 / CCTV-11 / CGTN
-names: applied 23 name(s) from presets/guangzhou-foshan.json
-3 locked mux(es), 27 channel(s) → ~/.dtmb/channels.json
-
-$ dtmb serve --table ~/.dtmb/channels.json
-table: 27 channels, 3 muxes
-tuned 506.000 MHz lock=1 strength=100% snr=20.1 dB
-HTTP:  http://127.0.0.1:8080/playlist.m3u
-$ vlc http://127.0.0.1:8080/p/522-401   # 自动换台到 522 MHz 出流
-```
-
-- 整频点 9.1 Mbit/s，单节目 ≈4 Mbit/s，188 字节包，AVS+ (0x42) + mp2
-- 单 tuner：`/p/<sid>.ts` 发现节目在别的频点 → 自动重调（约 1.5–2 s），旧连接由 epoch 断开
-- 多客户端看同一节目只占一份上游带宽（`Bytes` 引用计数扇出）
-- 多音轨 / 字幕：PID 过滤按 PMT 取**全部** ES，并每 800 ms 重读 PMT，所以切音轨、加字幕不需要重启
-
-> **AVS+ 播放提示**：节目是 AVS+，ffmpeg/VLC 自带的 `cavs` 只解 AVS1，会报
-> `unexpected start code`。要出画面需带 `libdavs2` 的 ffmpeg 或支持 AVS+ 的播放器
-> （PotPlayer / 部分电视盒子）。音频 mp2 可直接解。服务器只搬运不转码。
-
-## 用法
+## 在树莓派上装（5 分钟）
 
 ```bash
-dtmb info                                    # 设备/固件/当前频点
-dtmb scan --names presets/guangzhou-foshan.json   # 扫频建台表（默认存 ~/.dtmb/channels.json）
-dtmb scan --start-mhz 171 --end-mhz 219      # 单独扫 VHF（从化/花都的 179/203 频点）
-dtmb playlist                                # 打印 M3U
-dtmb serve --table ~/.dtmb/channels.json     # 起服务（单 tuner 换台）
-dtmb serve --freq-mhz 698 --udp 239.255.0.1:5000 --record cap.ts   # 固定频点 + UDP + 录制
-dtmb dump --freq-mhz 522 --seconds 10 --out cap.ts
-dtmb tsinfo cap.ts                           # 离线分析录制文件
+# Raspberry Pi OS 64-bit，USB 口插上电视棒，天线插电视棒
+sudo apt install -y libusb-1.0-0-dev pkg-config curl git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source ~/.cargo/env
+
+git clone <this repo> && cd dtmb
+sudo ./deploy/install.sh presets/guangzhou-foshan.json
 ```
 
-HTTP 端点：
+安装脚本做的事：编译 → 装到 `/usr/local/bin` → 建 `dtmb` 用户 → 装 udev 规则（免 root 访问 USB）
+→ 装 systemd 服务并开机自启。
 
-| 路径 | 内容 |
-|---|---|
-| `/playlist.m3u` | IPTV 播放列表（跨所有频点，按 provider 分组） |
-| `/p/<sid>.ts`、`/p/<name>.ts` | 单节目；必要时自动换台 |
-| `/stream.ts` | 当前频点整复用流 |
-| `/` | 状态页 + 频道表 |
-| `/status.json`、`/api/channels` | 机器可读状态 / 台表 |
-| `/healthz` | 探针 |
+首次启动会自动扫频（约 2–3 分钟），之后 `journalctl -u dtmb -f` 可以看到：
 
-## 协议（逆向自 hd2312 / DtmbUSB / LeDTMB）
+```
+table: 33 channel(s) / 4 mux(es)
+mDNS: http://dtmb.local:8080/playlist.m3u
+tuned 522.000 MHz lock=1 strength=100% snr=22.1 dB
+```
 
-设备 `04b4:1004`，vendor-class，两个 bulk-IN（`0x82` = TS，`0x86` 未用）。
-**枚举即 warm 态，不需要上传 FX2 固件**，这是跨平台的前提。vendor 控制传输，`wValue=0xFE`：
+不想用 mDNS（老路由不支持）就加 `--no-mdns`，用 `http://<树莓派IP>:8080/playlist.m3u`。
 
-| bRequest | 方向 | 长度 | 作用 |
-|---|---|---|---|
-| `0xED` | IN | 4 | 固件版本；`0x03`→Letv、`0x05`→Aiwa、`0x06`→CVB，其余按 NERC 处理 |
-| `0xFC` | OUT | 4 | 频率（Hz，大端） |
-| `0xEA` | OUT | 1 | 调谐 kick（Letv 固件必须；实测比 4 字节快 ~200 ms） |
-| `0xEA` | IN | 1 | 锁定标志 |
-| `0xAB` / `0xAC` | OUT | 0 | 开流 / 关流（**改频前必须关流，否则 FX2 会卡死**） |
-| `0xAD` / `0xAE` | OUT | 0 | 上下电（配合 150/350 ms 延时做 power-cycle 恢复） |
-| `0xEB` `0xE8` `0xE7` `0xEC` `0xE9` | IN | 4/2/6/1/3 | 强度 / SNR / 参数 / has_signal / 质量 |
-| `0xBE` / `0xBF` | OUT/IN | 9/22 | CVB 变体激活 key / hash |
+## 在安卓电视上订阅
 
-踩过的坑（都已在代码里处理）：
+装任意支持 M3U 的 IPTV 播放器（TiviMate / Kodi + PVR IPTV Simple / OTT Navigator / 电视直播类 App），
+**添加 M3U 播放列表**：
 
-1. **改频必须先 `0xAC` 关流**，否则 FX2 FIFO 卡死，后续调谐只返回 2 KB 垃圾。
-2. 失败后要 `0xAE/0xAD` power-cycle 才能恢复（`Dtmb::power_cycle`）。
-3. 解调器在失锁后会**继续上报上一个频点的锁/PSI**，所以扫描不能信 lock 位，要看真实 TS 字节 + PAT 是否变化（`tsid` 去重）。
-4. 首包有 2 KB `00ff00ff…` FIFO 残留，必须做跨 buffer 的 188 字节重同步。
-5. 中文台名多为 **GB2312 无标记**，按 ASCII 过滤会把“广州综合HD”变成“-HD”——已用 `encoding_rs` 正确解码。
-6. 频道栅格是 **474 + 8n**（UHF），从 470 起扫会全部错开 4 MHz，一个都锁不上。
+```
+http://dtmb.local:8080/playlist.m3u
+```
 
-## 编译
+播放列表里就是扫到的所有台（跨多个频点）。点台时服务器会自动把电视棒调到对应频点，
+换台约 **1.5–2 秒**（调谐 + 等 PAT/PMT），之后就是普通 HTTP 流，暂停/切台都在播放器里操作。
+
+> **AVS+ 解码**：国内 DTMB 视频是 AVS+，播放器必须带 AVS+ 解码器（电视盒子芯片一般硬解支持；
+> 纯软件播放器如 ExoPlayer 默认不支持，会黑屏只有声音）。音频是 mp2，都能放。
+> 这不是服务端问题——服务端只搬运、不转码。
+
+## 工作原理
+
+```
+L6 mdns     dtmb.local 广播
+L5 http     /playlist.m3u  /p/<sid>.ts  /status.json
+L4 catalog  频道表（scan 产物）+ 台名补丁 + M3U 生成
+L3 tuner    单 tuner 工作线程：懒调谐、换台、故障恢复、字节扇出
+L2 ts       188 字节重同步、PAT/PMT/SDT、PID 过滤
+L1 usb      vendor 控制协议 + bulk TS（libusb，无内核驱动）
+```
+
+设计要点：
+
+- **单 tuner 语义**：一根棒同时只能收一个频点。`/p/<id>.ts` 发现节目在别的频点就自动重调；
+  旧连接通过 `epoch` 断开，播放器重连即可，不会解出错误的节目。
+- **懒调谐**：没人看时不占用 tuner（树莓派更凉快），第一个请求才开机调谐。
+- **PID 过滤**：只给播放器发这个节目的 PMT/PCR/ES，整频点 9 Mbit/s → 单节目约 4 Mbit/s，
+  多音轨/字幕的 PID 全保留（切音轨、字幕不用重启）。
+- **自愈**：USB 读空 6 秒 → power-cycle 前端；USB 报错 → 重开设备；daemon 崩了 systemd 拉起。
+
+## 命令行
 
 ```bash
-brew install libusb && cargo build --release        # macOS
-sudo apt install libusb-1.0-0-dev pkg-config && cargo build --release   # Debian/Ubuntu
-# Windows：先用 Zadig 把 04b4:1004 绑到 WinUSB，再 cargo build --release
+dtmb scan                      # 重新扫频建表（搬家/换天线后跑）
+dtmb scan --names presets/guangzhou-foshan.json
+dtmb scan --start-mhz 171 --end-mhz 219     # 单独扫 VHF（部分城市有）
+dtmb serve                     # 前台跑（调试用，systemd 用同样参数）
 ```
 
-Linux 上若装了 `dvb_usb_hd2312` / `DtmbUSB` 内核模块，本程序会自动 detach，两者不要同时用。
+`/etc/dtmb/names.json` 可选：有些频点的 PMT 里没有 SDT 台名，用这个补丁按 `freq+sid` 命名
+（`presets/guangzhou-foshan.json` 是按 asiatvro 广州/佛山台表整理的）。
 
-## 代码结构
+## 硬件
 
-| 文件 | 职责 |
+- 电视棒：NERC / Letv / Aiwa / CVB 的 `04b4:1004`（CY68013A + HDIC HD2312 一类），几十块钱
+- 主机：树莓派 3/4/5、N100 小主机、任何 Linux（macOS 也能跑，Windows 需先用 Zadig 绑 WinUSB）
+- 天线：室内天线即可，`/status.json` 里 `strength_pct` / `snr_db` 判断信号质量；
+  `snr_db` 低于 ~10 dB 会花屏，换位置或换高增益天线
+- 树莓派供电要足（官方电源），USB 供电不足会掉设备
+
+## 排错
+
+| 现象 | 查什么 |
 |---|---|
-| `src/proto.rs` | 命令码、栅格、变体识别 |
-| `src/usb.rs` | rusb 封装：claim、EP0 STALL 恢复、关流改频、power-cycle、bulk 读 |
-| `src/ts.rs` | 188 字节重同步、PAT/PMT/SDT（CRC32 + GB2312）、PID 过滤、PSI 重打包 |
-| `src/registry.rs` | 频道表（JSON）、M3U 生成、外部台名补丁 |
-| `src/hub.rs` | 采集线程、`tokio::broadcast` 扇出、换台命令与 epoch |
-| `src/serve.rs` | axum HTTP-TS / 播放列表 / 状态页，UDP 推送 |
-| `presets/` | 台名补丁（asiatvro 广州/佛山整理） |
+| `no DTMB dongle found` | `lsusb` 有没有 `04b4:1004`；udev 规则是否装了；是否装了 dvb-usb 内核模块（会抢设备） |
+| 频道列表是空的 | 表没扫到：`journalctl -u dtmb` 看 scan 输出；先手动 `dtmb scan` 确认能锁定 |
+| 点台黑屏 | 播放器不支持 AVS+；先用 `ffprobe http://…/p/<sid>.ts` 确认流是好的 |
+| 换台很慢 / 经常失败 | 信号弱（`snr_db` 低），或 USB 供电不足 |
+| 电视找不到 dtmb.local | 路由器不支持 mDNS：改用 IP；或 `--no-mdns` 后手动填 IP |
 
-## 已知限制 / 待办
+## 开发
 
-- 单 tuner：同一时刻只能一个频点在线（一个人看足够；多频并发需要多根棒，`Hub` 已按频点抽象，扩展时用 `HashMap<freq, Hub>`）
-- AVS+ 不转码；要兼容浏览器可加 HLS + `libdavs2` 分支
-- VHF 频点（asiatvro 上的 179/203 MHz 从化/花都）本机收不到，未验证
-- EIT → XMLTV 节目单未做
-- RTSP 输出未做（老机顶盒）
-- 断流自动恢复：目前靠下一轮 read 报错重试，热插拔需重启
+```bash
+cargo test                 # 重同步 / 跨包拼接 / PSI 打包 / GB2312 台名
+cargo run -- serve --table /tmp/channels.json --no-mdns --bind 127.0.0.1:8080
+```
+
+协议细节（vendor 请求表、踩过的坑：改频必须先关流、失锁后上报旧 PSI、首包 2 KB FIFO 垃圾、
+GB2312 台名、474+8n 栅格）见 `src/usb/proto.rs` 与 git 历史。
+
+## 不做的事
+
+- 不转码：AVS+ 原样送，CPU 零负担
+- 不做多 tuner 并发：一个人/一家人看一个频点足够；真要并发就插多根棒，按频点复制 L3
+- 不做录制、EPG、UDP 组播：这些用播放器或 TVHeadend 解决

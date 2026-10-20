@@ -1,10 +1,13 @@
-//! Channel table: what the scanner found, persisted so `serve` can offer a
-//! playlist across every frequency without retuning to discover them.
+//! L4 — catalogue: the channel table produced by a scan, the M3U playlist the
+//! TV subscribes to, and external name patches for muxes that carry no SDT.
+//!
+//! The table is the only thing that knows about frequencies other than the one
+//! currently tuned, so it must survive restarts (JSON on disk).
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::proto::Status;
+use crate::usb::proto::Status;
 use crate::ts::{EsInfo, Program};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -86,10 +89,6 @@ impl ChannelTable {
                 self.channels()
                     .find(|c| c.label().to_lowercase().contains(&n))
             })
-    }
-
-    pub fn mux_of(&self, sid: u16) -> Option<u32> {
-        self.find(sid).map(|c| c.freq_hz)
     }
 
     pub fn load(path: &Path) -> Result<Self> {

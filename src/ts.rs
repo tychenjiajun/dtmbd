@@ -10,8 +10,6 @@ use std::collections::BTreeMap;
 pub const PKT: usize = 188;
 pub const SYNC: u8 = 0x47;
 pub const PID_PAT: u16 = 0x0000;
-#[allow(dead_code)]
-pub const PID_NULL: u16 = 0x1FFF;
 pub const PID_SDT: u16 = 0x0011;
 
 /// Re-aligns an arbitrary byte stream into 188-byte TS packets.
@@ -34,43 +32,51 @@ impl Default for Aligner {
 
 impl Aligner {
     /// Feed raw bytes, append whole aligned packets to `out`.
+    ///
+    /// Locking is deliberately sticky: one corrupted packet must not throw away
+    /// the whole 64 KB chunk (that used to lose 96% of the stream). We emit
+    /// packets up to the first bad sync byte, then re-hunt inside the remainder.
     pub fn push(&mut self, data: &[u8], out: &mut Vec<u8>) {
         self.rem.extend_from_slice(data);
 
-        if !self.locked {
-            match find_sync(&self.rem) {
-                Some(off) => {
-                    if off > 0 {
-                        self.rem.drain(..off);
-                        self.resyncs += 1;
+        loop {
+            if !self.locked {
+                match find_sync(&self.rem) {
+                    Some(off) => {
+                        if off > 0 {
+                            self.rem.drain(..off);
+                            self.resyncs += 1;
+                        }
+                        self.locked = true;
                     }
-                    self.locked = true;
-                }
-                None => {
-                    // no usable sync yet: keep a tail in case a packet straddles
-                    if self.rem.len() > PKT * 4 {
-                        let keep = self.rem.len() - PKT;
-                        self.rem.drain(..keep);
+                    None => {
+                        // keep a tail in case the next write completes a packet
+                        if self.rem.len() > PKT * 4 {
+                            let keep = self.rem.len() - PKT;
+                            self.rem.drain(..keep);
+                        }
+                        return;
                     }
-                    return;
                 }
             }
-        }
 
-        let n = self.rem.len() / PKT * PKT;
-        if n == 0 {
-            return;
+            let mut i = 0usize;
+            while i + PKT <= self.rem.len() {
+                if self.rem[i] != SYNC {
+                    self.locked = false;
+                    self.resyncs += 1;
+                    break;
+                }
+                i += PKT;
+            }
+            if i > 0 {
+                out.extend_from_slice(&self.rem[..i]);
+                self.rem.drain(..i);
+            }
+            if self.locked || self.rem.len() < 3 * PKT {
+                return;
+            }
         }
-        // verify we are still in sync at the end of the chunk, otherwise re-hunt
-        if self.rem[n - PKT] != SYNC {
-            self.locked = false;
-            let tail = self.rem.split_off(n.saturating_sub(PKT));
-            self.rem = tail;
-            self.push(&[], out);
-            return;
-        }
-        out.extend_from_slice(&self.rem[..n]);
-        self.rem.drain(..n);
     }
 
     #[allow(dead_code)]
