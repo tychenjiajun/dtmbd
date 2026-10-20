@@ -187,14 +187,24 @@ impl Tuner {
         let mut backoff = Duration::from_millis(200);
 
         loop {
-            // 1. commands (block longer while idle so an idle Pi is quiet)
-            let wait = if tuned.is_some() {
-                Duration::from_millis(20)
+            // 1. commands. While streaming this must NOT block: every millisecond
+            // spent here is time the FX2 FIFO is not drained (9 Mbit/s ≈ 1.1 KB/ms),
+            // which used to show up as ~3-10% continuity-counter errors in the TS.
+            let cmd = if tuned.is_some() {
+                match cmd_rx.try_recv() {
+                    Ok(c) => Some(c),
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => None,
+                }
             } else {
-                Duration::from_millis(500)
+                match cmd_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(c) => Some(c),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                }
             };
-            match cmd_rx.recv_timeout(wait) {
-                Ok(Cmd::Tune { hz, reply }) => {
+            match cmd {
+                Some(Cmd::Tune { hz, reply }) => {
                     want = Some(hz);
                     if tuned == Some(hz) && dev.is_some() {
                         let _ = reply.send(Ok(()));
@@ -217,18 +227,17 @@ impl Tuner {
                     }
                     let _ = reply.send(res.map_err(|e| format!("{e:#}")));
                 }
-                Ok(Cmd::Meter { hz, reply }) => {
+                Some(Cmd::Meter { hz, reply }) => {
                     let res = self.meter_step(&mut dev, &mut meter, &mut tuned, hz);
                     let _ = reply.send(res.map_err(|e| format!("{e:#}")));
                 }
-                Ok(Cmd::MeterStop { reply }) => {
+                Some(Cmd::MeterStop { reply }) => {
                     meter = None;
                     // force the normal path to re-tune and restart streaming
                     tuned = None;
                     let _ = reply.send(Ok(()));
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                None => {}
             }
 
             // meter mode owns the frontend: no streaming, no auto-recovery noise
